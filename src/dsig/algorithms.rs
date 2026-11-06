@@ -147,15 +147,29 @@ impl DigestAlgorithm {
 
     /// Compute the digest of `bytes`.
     pub fn digest(self, bytes: &[u8]) -> Vec<u8> {
-        use sha2::Digest as _;
-        match self {
-            Self::Sha256 => sha2::Sha256::digest(bytes).to_vec(),
-            Self::Sha384 => sha2::Sha384::digest(bytes).to_vec(),
-            Self::Sha512 => sha2::Sha512::digest(bytes).to_vec(),
-            #[cfg(feature = "weak-algos")]
-            Self::Sha1 => {
-                use sha1::Digest as _;
-                sha1::Sha1::digest(bytes).to_vec()
+        #[cfg(feature = "fips")]
+        {
+            let alg = match self {
+                Self::Sha256 => &aws_lc_rs::digest::SHA256,
+                Self::Sha384 => &aws_lc_rs::digest::SHA384,
+                Self::Sha512 => &aws_lc_rs::digest::SHA512,
+                #[cfg(feature = "weak-algos")]
+                Self::Sha1 => &aws_lc_rs::digest::SHA1_FOR_LEGACY_USE_ONLY,
+            };
+            aws_lc_rs::digest::digest(alg, bytes).as_ref().to_vec()
+        }
+        #[cfg(not(feature = "fips"))]
+        {
+            use sha2::Digest as _;
+            match self {
+                Self::Sha256 => sha2::Sha256::digest(bytes).to_vec(),
+                Self::Sha384 => sha2::Sha384::digest(bytes).to_vec(),
+                Self::Sha512 => sha2::Sha512::digest(bytes).to_vec(),
+                #[cfg(feature = "weak-algos")]
+                Self::Sha1 => {
+                    use sha1::Digest as _;
+                    sha1::Sha1::digest(bytes).to_vec()
+                }
             }
         }
     }
@@ -452,10 +466,25 @@ mod tests {
 
     #[test]
     fn digest_known_answer_vector_abc() {
-        // FIPS 180-4 KAT for "abc".
+        // FIPS 180-4 KATs for "abc". These run against whichever backend the
+        // `fips` feature selects, so a FIPS build is checked against the
+        // published vectors rather than only against the non-FIPS crates.
         assert_eq!(
             hex::encode(DigestAlgorithm::Sha256.digest(b"abc")),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        );
+        assert_eq!(
+            hex::encode(DigestAlgorithm::Sha384.digest(b"abc")),
+            "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7",
+        );
+        assert_eq!(
+            hex::encode(DigestAlgorithm::Sha512.digest(b"abc")),
+            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
+        );
+        #[cfg(feature = "weak-algos")]
+        assert_eq!(
+            hex::encode(DigestAlgorithm::Sha1.digest(b"abc")),
+            "a9993e364706816aba3e25717850c26c9cd0d89d",
         );
     }
 
