@@ -21,7 +21,9 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use sha2::{Digest as _, Sha256, Sha384, Sha512};
+#[cfg(test)]
+use sha2::Digest as _;
+use sha2::{Sha256, Sha384, Sha512};
 use std::fmt;
 use std::time::SystemTime;
 
@@ -34,7 +36,7 @@ use subtle::ConstantTimeEq as _;
 use x509_cert::Certificate;
 use x509_cert::der::{Decode as _, DecodePem, Encode as _};
 
-use crate::dsig::algorithms::SignatureAlgorithm;
+use crate::dsig::algorithms::{DigestAlgorithm, SignatureAlgorithm};
 use crate::error::Error;
 
 /// A parsed X.509 v3 certificate.
@@ -142,9 +144,9 @@ impl X509Certificate {
         let public_key = PublicKey::from_spki_der(&spki_der)?;
         let subject_str = cert.tbs_certificate.subject.to_string();
         let issuer_str = cert.tbs_certificate.issuer.to_string();
-        let mut hasher = Sha256::new();
-        hasher.update(&der);
-        let fingerprint: [u8; 32] = hasher.finalize().into();
+        // Route through `DigestAlgorithm` so the `fips` feature covers this.
+        let mut fingerprint = [0u8; 32];
+        fingerprint.copy_from_slice(&DigestAlgorithm::Sha256.digest(&der));
         Ok(Self {
             inner: cert,
             der,

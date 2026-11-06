@@ -46,8 +46,6 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 #[cfg(feature = "artifact-binding")]
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-#[cfg(feature = "artifact-binding")]
-use rand::RngCore as _;
 
 use crate::attribute::Attribute;
 use crate::authn::request_parse::parse_authn_request;
@@ -1415,7 +1413,9 @@ impl ArtifactResolveTransaction {
                 reason: "AES-256-GCM key size mismatch",
             })?;
         let mut nonce_bytes = [0u8; 12];
-        rand::rng().fill_bytes(&mut nonce_bytes);
+        crate::crypto::entropy::try_fill_random(&mut nonce_bytes).map_err(|_err| {
+            Error::InvalidConfiguration { reason: "RNG failure generating artifact transaction nonce" }
+        })?;
         let ciphertext = cipher
             .encrypt(
                 aes_gcm::Nonce::from_slice(&nonce_bytes),

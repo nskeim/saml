@@ -37,7 +37,7 @@ use std::time::SystemTime;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use rsa::rand_core::{OsRng, RngCore as _};
+#[cfg(any(not(feature = "fips"), test))]
 use sha1::{Digest as _, Sha1};
 use url::Url;
 
@@ -119,6 +119,19 @@ pub(crate) fn parse_type4_artifact(artifact: &str) -> Result<Type4Artifact, Erro
 
 /// The SourceID required in a Type-4 artifact for `issuer_entity_id`.
 pub(crate) fn source_id(issuer_entity_id: &str) -> [u8; 20] {
+    #[cfg(feature = "fips")]
+    {
+        let mut out = [0u8; 20];
+        out.copy_from_slice(
+            aws_lc_rs::digest::digest(
+                &aws_lc_rs::digest::SHA1_FOR_LEGACY_USE_ONLY,
+                issuer_entity_id.as_bytes(),
+            )
+            .as_ref(),
+        );
+        out
+    }
+    #[cfg(not(feature = "fips"))]
     Sha1::digest(issuer_entity_id.as_bytes()).into()
 }
 
@@ -146,11 +159,11 @@ pub fn make_artifact(issuer_entity_id: &str, endpoint_index: u16) -> Result<Stri
     // Bytes 4..24: SourceID = SHA-1(entity_id).
     buf[4..24].copy_from_slice(&source_id(issuer_entity_id));
     // Bytes 24..44: MessageHandle = 20 random bytes.
-    OsRng
-        .try_fill_bytes(&mut buf[24..44])
-        .map_err(|_err| Error::InvalidConfiguration {
+    crate::crypto::entropy::try_fill_random(&mut buf[24..44]).map_err(|_err| {
+        Error::InvalidConfiguration {
             reason: "RNG failure generating artifact MessageHandle",
-        })?;
+        }
+    })?;
 
     Ok(BASE64.encode(buf))
 }

@@ -29,14 +29,12 @@ use crate::error::Error;
 pub(crate) fn random_xml_id() -> Result<String, Error> {
     use std::fmt::Write as _;
 
-    use rsa::rand_core::{OsRng, RngCore as _};
-
     let mut bytes = [0u8; 16];
-    OsRng
-        .try_fill_bytes(&mut bytes)
-        .map_err(|_err| Error::InvalidConfiguration {
+    crate::crypto::entropy::try_fill_random(&mut bytes).map_err(|_err| {
+        Error::InvalidConfiguration {
             reason: "RNG failure generating random XML ID",
-        })?;
+        }
+    })?;
 
     // Lowercase two-char hex per byte. `{:02x}` is total over `u8`, so there is
     // no fallible nibble lookup and no silent-truncation branch (and no

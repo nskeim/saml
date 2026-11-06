@@ -11,7 +11,6 @@ use aes_gcm::aead::{Aead, KeyInit, Payload};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hmac::{Hmac, Mac};
-use rand::RngCore as _;
 use sha2::Sha256;
 
 use crate::attribute::Attribute;
@@ -68,7 +67,7 @@ struct ProxyInstance(u128);
 impl ProxyInstance {
     fn new() -> Self {
         let mut bytes = [0u8; 16];
-        rand::rng().fill_bytes(&mut bytes);
+        crate::crypto::entropy::fill_random(&mut bytes);
         Self(u128::from_be_bytes(bytes))
     }
 }
@@ -377,7 +376,9 @@ impl ProxyContextCodec for Aes256GcmCodec {
 
         // Random 12-byte nonce.
         let mut nonce_bytes = [0u8; 12];
-        rand::rng().fill_bytes(&mut nonce_bytes);
+        crate::crypto::entropy::try_fill_random(&mut nonce_bytes).map_err(|_err| {
+            Error::InvalidConfiguration { reason: "RNG failure generating proxy context nonce" }
+        })?;
         let nonce = aes_gcm::Nonce::from_slice(&nonce_bytes);
 
         let ct_with_tag = cipher
@@ -546,7 +547,9 @@ impl<S: ProxyContextStore> ProxyContextCodec for OpaqueHandleCodec<S> {
             })?;
         let effective_ttl = self.ttl.min(remaining_lifetime);
         let mut bytes = vec![0u8; self.handle_byte_len];
-        rand::rng().fill_bytes(&mut bytes);
+        crate::crypto::entropy::try_fill_random(&mut bytes).map_err(|_err| {
+            Error::InvalidConfiguration { reason: "RNG failure generating proxy context handle" }
+        })?;
         let handle = URL_SAFE_NO_PAD.encode(&bytes);
         // Forward the grant rather than the payload: `put` is public, so a
         // caller who could call it with a bare payload would not need this
@@ -761,7 +764,9 @@ impl Proxy<'_> {
                     reason: "proxy context expiry overflow",
                 })?;
         let mut transaction_id = [0u8; 16];
-        rand::rng().fill_bytes(&mut transaction_id);
+        crate::crypto::entropy::try_fill_random(&mut transaction_id).map_err(|_err| {
+            Error::InvalidConfiguration { reason: "RNG failure generating proxy transaction ID" }
+        })?;
 
         // 2. Build the ProxyContextPayload from the parsed downstream request.
         // Seal the provenance the validator established, not the `pub`
@@ -1321,7 +1326,7 @@ fn inject_relay_state(dispatch: Dispatch, relay_state: &str) -> Dispatch {
 /// itself is opaque to SPs (used for SLO targeting).
 fn make_session_index() -> String {
     let mut bytes = [0u8; 16];
-    rand::rng().fill_bytes(&mut bytes);
+    crate::crypto::entropy::fill_random(&mut bytes);
     let mut out = String::with_capacity(33);
     out.push('_');
     for b in bytes {
