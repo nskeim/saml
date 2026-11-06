@@ -61,6 +61,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 percent-encoding = "2"
 zeroize = { version = "1", features = ["derive"] }
 subtle = "2"
+aws-lc-rs = { version = "1", optional = true, features = ["fips"] }
 
 [features]
 default = ["reqwest-client", "rsa-sha", "ecdsa-sha", "xmlenc", "slo", "metadata-emit", "xsd-validate"]
@@ -86,6 +87,11 @@ idp-disco = []
 # desktop apps and federated CLI tooling. Layers a SOAP envelope + PAOS header
 # blocks on top of the existing assertion machinery; reuses `binding::soap`.
 ecp = []
+# FIPS-validated cryptography: route all crypto through AWS-LC (aws-lc-rs
+# with its `fips` feature, statically linked).
+# PR A covers digests, certificate fingerprints and all randomness; signing,
+# verification, key transport and HMAC follow in later PRs.
+fips = ["dep:aws-lc-rs", "aws-lc-rs/fips"]
 weak-algos = ["dep:sha1"]
 # Structural XSD-style schema validation of inbound SAML messages. On by
 # default; opt-out via `default-features = false` for permissive interop with

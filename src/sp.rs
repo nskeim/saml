@@ -10,8 +10,6 @@ use aes_gcm::Aes256Gcm;
 use aes_gcm::aead::{Aead, KeyInit};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use rand::Rng as _;
-
 use crate::authn::request_build::{AcsRequest, BuildAuthnRequest, build_authn_request_xml};
 use crate::authn_context::RequestedAuthnContext;
 use crate::binding::post::encode_request as post_encode_request;
@@ -345,7 +343,9 @@ impl LoginTrackerPayload {
                 reason: "AES-256-GCM key size mismatch",
             })?;
         let mut nonce_bytes = [0u8; 12];
-        rand::rng().fill_bytes(&mut nonce_bytes);
+        crate::crypto::entropy::try_fill_random(&mut nonce_bytes).map_err(|_err| {
+            Error::InvalidConfiguration { reason: "RNG failure generating login tracker nonce" }
+        })?;
         let ct = cipher
             .encrypt(
                 &aes_gcm::Nonce::from(nonce_bytes),
