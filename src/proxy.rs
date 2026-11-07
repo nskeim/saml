@@ -10,8 +10,6 @@ use std::time::{Duration, SystemTime};
 use aes_gcm::Aes256Gcm;
 #[cfg(not(feature = "fips"))]
 use aes_gcm::aead::{Aead, KeyInit, Payload};
-#[cfg(feature = "fips")]
-use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, UnboundKey};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 #[cfg(not(feature = "fips"))]
@@ -367,49 +365,6 @@ impl Aes256GcmCodec {
     }
 }
 
-#[cfg(feature = "fips")]
-fn gcm_seal_fips(key: &[u8; 32], nonce: &[u8; 12], plaintext: &[u8]) -> Result<Vec<u8>, Error> {
-    let less_safe = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, key).map_err(|_err| {
-        Error::InvalidConfiguration {
-            reason: "AES-256-GCM key size mismatch",
-        }
-    })?);
-    let mut in_out = plaintext.to_vec();
-    less_safe
-        .seal_in_place_append_tag(
-            aws_lc_rs::aead::Nonce::assume_unique_for_key(*nonce),
-            Aad::empty(),
-            &mut in_out,
-        )
-        .map_err(|_err| Error::DecryptFailed {
-            reason: "proxy context",
-        })?;
-    Ok(in_out)
-}
-
-#[cfg(feature = "fips")]
-fn gcm_open_fips(key: &[u8; 32], nonce: &[u8], ct_with_tag: &[u8]) -> Result<Vec<u8>, Error> {
-    let nonce: [u8; 12] = nonce.try_into().map_err(|_err| Error::DecryptFailed {
-        reason: "proxy context",
-    })?;
-    let less_safe = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, key).map_err(|_err| {
-        Error::InvalidConfiguration {
-            reason: "AES-256-GCM key size mismatch",
-        }
-    })?);
-    let mut in_out = ct_with_tag.to_vec();
-    less_safe
-        .open_in_place(
-            aws_lc_rs::aead::Nonce::assume_unique_for_key(nonce),
-            Aad::empty(),
-            &mut in_out,
-        )
-        .map_err(|_err| Error::DecryptFailed {
-            reason: "proxy context",
-        })?;
-    Ok(in_out)
-}
-
 impl ProxyContextCodec for Aes256GcmCodec {
     fn encode(&self, grant: &SealingGrant<'_>) -> Result<String, Error> {
         let context = grant.payload();
@@ -427,7 +382,8 @@ impl ProxyContextCodec for Aes256GcmCodec {
         })?;
 
         #[cfg(feature = "fips")]
-        let ct_with_tag = gcm_seal_fips(&self.key, &nonce_bytes, &plaintext)?;
+        let ct_with_tag =
+            crate::crypto::aead::gcm_seal(&self.key, &nonce_bytes, &plaintext, "proxy context")?;
         #[cfg(not(feature = "fips"))]
         let ct_with_tag = {
             let cipher = Aes256Gcm::new_from_slice(&self.key).map_err(|_err| {
@@ -470,7 +426,8 @@ impl ProxyContextCodec for Aes256GcmCodec {
         let (nonce_bytes, ct_with_tag) = bytes.split_at(12);
 
         #[cfg(feature = "fips")]
-        let plaintext = gcm_open_fips(&self.key, nonce_bytes, ct_with_tag)?;
+        let plaintext =
+            crate::crypto::aead::gcm_open(&self.key, nonce_bytes, ct_with_tag, "proxy context")?;
         #[cfg(not(feature = "fips"))]
         let plaintext = {
             let cipher = Aes256Gcm::new_from_slice(&self.key).map_err(|_err| {
