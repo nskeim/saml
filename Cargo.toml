@@ -87,9 +87,9 @@ idp-disco = []
 # blocks on top of the existing assertion machinery; reuses `binding::soap`.
 ecp = []
 # FIPS-validated cryptography: route all crypto through AWS-LC (aws-lc-rs
-# with its `fips` feature, statically linked).
-# PR A covers digests, certificate fingerprints and all randomness; signing,
-# verification, key transport and HMAC follow in later PRs.
+# with its `fips` feature, statically linked). All crypto paths — digests,
+# signing/verification, key transport, HMAC, AES-GCM/CBC seals — are routed;
+# see docs/rfcs/RFC-009-fips.md.
 fips = ["dep:aws-lc-rs", "aws-lc-rs/fips"]
 weak-algos = ["dep:sha1"]
 # Structural XSD-style schema validation of inbound SAML messages. On by
