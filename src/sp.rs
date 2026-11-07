@@ -6,7 +6,9 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+#[cfg(not(feature = "fips"))]
 use aes_gcm::Aes256Gcm;
+#[cfg(not(feature = "fips"))]
 use aes_gcm::aead::{Aead, KeyInit};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -333,27 +335,33 @@ impl LoginTrackerPayload {
             postcard::to_allocvec(&wire).map_err(|_err| Error::InvalidConfiguration {
                 reason: "login tracker serialize",
             })?;
-        let cipher =
-            Aes256Gcm::new_from_slice(key).map_err(|_err| Error::InvalidConfiguration {
-                reason: "AES-256-GCM key size mismatch",
-            })?;
         let mut nonce_bytes = [0u8; 12];
         crate::crypto::entropy::try_fill_random(&mut nonce_bytes).map_err(|_err| {
             Error::InvalidConfiguration {
                 reason: "RNG failure generating login tracker nonce",
             }
         })?;
-        let ct = cipher
-            .encrypt(
-                aes_gcm::Nonce::from_slice(&nonce_bytes),
-                aes_gcm::aead::Payload {
-                    msg: &plaintext,
-                    aad: &[],
-                },
-            )
-            .map_err(|_err| Error::DecryptFailed {
-                reason: "login tracker",
-            })?;
+
+        #[cfg(feature = "fips")]
+        let ct = crate::crypto::aead::gcm_seal(key, &nonce_bytes, &plaintext, "login tracker")?;
+        #[cfg(not(feature = "fips"))]
+        let ct = {
+            let cipher =
+                Aes256Gcm::new_from_slice(key).map_err(|_err| Error::InvalidConfiguration {
+                    reason: "AES-256-GCM key size mismatch",
+                })?;
+            cipher
+                .encrypt(
+                    aes_gcm::Nonce::from_slice(&nonce_bytes),
+                    aes_gcm::aead::Payload {
+                        msg: &plaintext,
+                        aad: &[],
+                    },
+                )
+                .map_err(|_err| Error::DecryptFailed {
+                    reason: "login tracker",
+                })?
+        };
         let mut buf = Vec::with_capacity(12usize.saturating_add(ct.len()));
         buf.extend_from_slice(&nonce_bytes);
         buf.extend_from_slice(&ct);
@@ -440,18 +448,24 @@ impl LoginTracker {
             });
         }
         let (nonce_bytes, ct) = bytes.split_at(12);
-        let cipher =
-            Aes256Gcm::new_from_slice(key).map_err(|_err| Error::InvalidConfiguration {
-                reason: "AES-256-GCM key size mismatch",
-            })?;
-        let plaintext = cipher
-            .decrypt(
-                aes_gcm::Nonce::from_slice(nonce_bytes),
-                aes_gcm::aead::Payload { msg: ct, aad: &[] },
-            )
-            .map_err(|_err| Error::DecryptFailed {
-                reason: "login tracker",
-            })?;
+
+        #[cfg(feature = "fips")]
+        let plaintext = crate::crypto::aead::gcm_open(key, nonce_bytes, ct, "login tracker")?;
+        #[cfg(not(feature = "fips"))]
+        let plaintext = {
+            let cipher =
+                Aes256Gcm::new_from_slice(key).map_err(|_err| Error::InvalidConfiguration {
+                    reason: "AES-256-GCM key size mismatch",
+                })?;
+            cipher
+                .decrypt(
+                    aes_gcm::Nonce::from_slice(nonce_bytes),
+                    aes_gcm::aead::Payload { msg: ct, aad: &[] },
+                )
+                .map_err(|_err| Error::DecryptFailed {
+                    reason: "login tracker",
+                })?
+        };
         let wire: LoginTrackerPayload =
             postcard::from_bytes(&plaintext).map_err(|_err| Error::DecryptFailed {
                 reason: "login tracker",
