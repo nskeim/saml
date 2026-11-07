@@ -274,6 +274,50 @@ jobs:
       - name: cargo doc --all-features
         run: cargo doc --workspace --all-features --no-deps
 
+  # The `fips` feature routes crypto through AWS-LC, which is compiled from
+  # source for the FIPS build: it needs a C compiler (preinstalled), cmake, and
+  # Go (the FIPS module generates part of its code with Go). This lane is
+  # stable-only — the AWS-LC source build is slow and the FIPS posture does not
+  # depend on the Rust toolchain. The `fips+weak-algos` arm proves that
+  # `fips,weak-algos` still compiles (the default policy stays FIPS-compliant;
+  # see RFC-009 §4).
+  fips:
+    name: FIPS (AWS-LC)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: fips
+            features: "fips artifact-binding"
+          - name: fips+weak-algos
+            features: "fips artifact-binding weak-algos"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cmake
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fips-${{ matrix.name }}
+
+      - name: Clippy
+        run: cargo clippy --workspace --exclude saml-keycloak-example --all-targets --features ${{ matrix.features }} -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --exclude saml-keycloak-example --features ${{ matrix.features }}
+
   # ---------------------------------------------------------------------------
   # Future home of the Keycloak e2e suite — gated by SAML_RUN_KEYCLOAK_E2E=1
   # and a docker-spun Keycloak. Left as a stub for now.
