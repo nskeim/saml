@@ -17,7 +17,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use rsa::RsaPublicKey;
 use rsa::pkcs1::DecodeRsaPublicKey as _;
-use rsa::rand_core::{OsRng, RngCore as _};
+use rsa::rand_core::OsRng;
 #[cfg(feature = "weak-algos")]
 use sha1::Sha1;
 use sha2::Sha256;
@@ -123,15 +123,11 @@ fn rsa_public_key_from_cert(cert: &X509Certificate) -> Result<RsaPublicKey, Erro
     RsaPublicKey::from_pkcs1_der(key_bytes).map_err(|_err| Error::X509Parse)
 }
 
-/// Fill a buffer with cryptographically random bytes. We use the OS RNG
-/// provided by the `rsa` crate's re-export of `rand_core` (the same RNG type
-/// the RSA encrypt path expects), so the entire encryption pipeline runs
-/// against a single entropy source.
+/// Fill a buffer with cryptographically random bytes, delegating to the
+/// crate's central entropy source (`crypto::entropy`) so FIPS builds draw
+/// from AWS-LC. RNG failure collapses to a generic reason.
 fn fill_random(buf: &mut [u8]) -> Result<(), Error> {
-    let mut rng = OsRng;
-    // Discarded intentionally: RNG failure detail is platform-specific and
-    // not useful to callers; collapse to a generic reason.
-    rng.try_fill_bytes(buf)
+    crate::crypto::entropy::try_fill_random(buf)
         .map_err(|_err| Error::DecryptFailed { reason: "rng" })
 }
 
