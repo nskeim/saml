@@ -114,8 +114,9 @@ A FIPS build enforces the following at validation time (before any crypto runs):
 Routing signing and verification to AWS-LC (PR B) removes the pure-Rust `rsa`
 crate from those two paths in a FIPS build, which closes the
 RUSTSEC-2023-0071 "Marvin Attack" timing exposure on RSA **signing** and
-**verification**. PRs C2 and C3 route the remaining paths — xmlenc AES-GCM/CBC,
-RSA-OAEP key transport, and the proxy HMAC-SHA-256 / AES-256-GCM codec — to
+**verification**. PRs C2, C3, C4 and C5 route the remaining paths — xmlenc
+AES-GCM/CBC, RSA-OAEP key transport, the proxy HMAC-SHA-256 / AES-256-GCM
+codec, and the login-tracker and artifact-transaction AES-256-GCM seals — to
 AWS-LC as well, so a FIPS build's default posture runs every crypto primitive
 on the validated module. The only pure-Rust `rsa` code still reachable in a
 FIPS build is the legacy RSA-PKCS#1-v1.5 key-transport path, which `weak-algos`
