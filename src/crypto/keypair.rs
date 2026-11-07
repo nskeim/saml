@@ -31,6 +31,14 @@ use crate::crypto::cert::{PublicKey, PublicKeyAlgorithm, X509Certificate};
 use crate::dsig::algorithms::SignatureAlgorithm;
 use crate::error::Error;
 
+#[cfg(feature = "fips")]
+use aws_lc_rs::rand::SystemRandom;
+#[cfg(feature = "fips")]
+use aws_lc_rs::signature::{
+    ECDSA_P256_SHA256_FIXED_SIGNING, ECDSA_P384_SHA384_FIXED_SIGNING, EcdsaKeyPair,
+    RSA_PKCS1_SHA256, RSA_PKCS1_SHA384, RSA_PKCS1_SHA512, RsaKeyPair,
+};
+
 /// Hash selection for RSA-OAEP.
 ///
 /// Names a hash only. It is used in two independent positions — the message
@@ -141,12 +149,37 @@ impl OaepDigest {
 /// `cert` field holds the matching X.509 certificate; this is needed for
 /// outbound signing flows that embed `<ds:X509Certificate>` in `<ds:KeyInfo>`
 /// (RFC-002 §6).
-#[derive(Clone)]
+#[cfg_attr(not(feature = "fips"), derive(Clone))]
 pub struct KeyPair {
     inner: KeyPairInner,
     cert: Option<X509Certificate>,
     // Cached public-key view so callers don't pay re-parsing cost.
     public_key: PublicKey,
+    // FIPS build: lazily-built aws-lc-rs signer, cached after first use.
+    #[cfg(feature = "fips")]
+    aws_signer: std::sync::Mutex<std::option::Option<AwsSigningKey>>,
+}
+
+#[cfg(feature = "fips")]
+impl Clone for KeyPair {
+    fn clone(&self) -> Self {
+        // The aws-lc-rs signer is derived from `inner`, so a fresh (empty)
+        // Mutex on the clone re-derives it lazily on first use.
+        Self {
+            inner: self.inner.clone(),
+            cert: self.cert.clone(),
+            public_key: self.public_key.clone(),
+            aws_signer: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+/// FIPS-build aws-lc-rs signing keys, built lazily from the stored secrets.
+#[cfg(feature = "fips")]
+enum AwsSigningKey {
+    Rsa(RsaKeyPair),
+    EcdsaP256(EcdsaKeyPair),
+    EcdsaP384(EcdsaKeyPair),
 }
 
 #[derive(Clone)]
@@ -251,6 +284,8 @@ impl KeyPair {
             inner: KeyPairInner::Rsa(RsaSecret { key }),
             cert: None,
             public_key,
+            #[cfg(feature = "fips")]
+            aws_signer: std::sync::Mutex::new(None),
         })
     }
 
@@ -267,6 +302,8 @@ impl KeyPair {
             inner: KeyPairInner::EcdsaP256(P256Secret { key }),
             cert: None,
             public_key,
+            #[cfg(feature = "fips")]
+            aws_signer: std::sync::Mutex::new(None),
         })
     }
 
@@ -283,6 +320,8 @@ impl KeyPair {
             inner: KeyPairInner::EcdsaP384(P384Secret { key }),
             cert: None,
             public_key,
+            #[cfg(feature = "fips")]
+            aws_signer: std::sync::Mutex::new(None),
         })
     }
 
@@ -348,6 +387,18 @@ impl KeyPair {
         algorithm: SignatureAlgorithm,
         signed_bytes: &[u8],
     ) -> Result<Vec<u8>, Error> {
+        // FIPS build: RSA-SHA1 (weak-algos) has no aws-lc-rs signing const, so
+        // it stays pure-Rust; everything else routes through aws-lc-rs.
+        #[cfg(all(feature = "fips", feature = "weak-algos"))]
+        if let (KeyPairInner::Rsa(secret), SignatureAlgorithm::RsaSha1) = (&self.inner, algorithm)
+        {
+            return sign_rsa::<sha1::Sha1>(&secret.key, signed_bytes);
+        }
+        #[cfg(feature = "fips")]
+        {
+            self.sign_fips(algorithm, signed_bytes)
+        }
+        #[cfg(not(feature = "fips"))]
         match (&self.inner, algorithm) {
             (KeyPairInner::Rsa(secret), SignatureAlgorithm::RsaSha256) => {
                 sign_rsa::<Sha256>(&secret.key, signed_bytes)
@@ -389,6 +440,126 @@ impl KeyPair {
                     self.algorithm_family()
                 ),
             }),
+        }
+    }
+
+    /// FIPS build: sign via aws-lc-rs using the lazily-built signer.
+    #[cfg(feature = "fips")]
+    fn sign_fips(
+        &self,
+        algorithm: SignatureAlgorithm,
+        signed_bytes: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        let guard = self.aws_signer()?;
+        let Some(key) = guard.as_ref() else {
+            return Err(Error::InvalidConfiguration {
+                reason: "signer not initialized",
+            })
+        };
+        let rng = SystemRandom::new();
+        match (key, algorithm) {
+            (AwsSigningKey::Rsa(kp), SignatureAlgorithm::RsaSha256) => {
+                let mut sig = vec![0u8; kp.public_modulus_len()];
+                kp.sign(&RSA_PKCS1_SHA256, &rng, signed_bytes, &mut sig)
+                    .map_err(|_e| Error::SignatureVerification {
+                        reason: "rsa sign failed",
+                    })?;
+                Ok(sig)
+            }
+            (AwsSigningKey::Rsa(kp), SignatureAlgorithm::RsaSha384) => {
+                let mut sig = vec![0u8; kp.public_modulus_len()];
+                kp.sign(&RSA_PKCS1_SHA384, &rng, signed_bytes, &mut sig)
+                    .map_err(|_e| Error::SignatureVerification {
+                        reason: "rsa sign failed",
+                    })?;
+                Ok(sig)
+            }
+            (AwsSigningKey::Rsa(kp), SignatureAlgorithm::RsaSha512) => {
+                let mut sig = vec![0u8; kp.public_modulus_len()];
+                kp.sign(&RSA_PKCS1_SHA512, &rng, signed_bytes, &mut sig)
+                    .map_err(|_e| Error::SignatureVerification {
+                        reason: "rsa sign failed",
+                    })?;
+                Ok(sig)
+            }
+            (AwsSigningKey::EcdsaP256(kp), SignatureAlgorithm::EcdsaSha256) => {
+                let sig = kp.sign(&rng, signed_bytes).map_err(|_e| {
+                    Error::SignatureVerification {
+                        reason: "ecdsa sign failed",
+                    }
+                })?;
+                Ok(sig.as_ref().to_vec())
+            }
+            (AwsSigningKey::EcdsaP384(kp), SignatureAlgorithm::EcdsaSha384) => {
+                let sig = kp.sign(&rng, signed_bytes).map_err(|_e| {
+                    Error::SignatureVerification {
+                        reason: "ecdsa sign failed",
+                    }
+                })?;
+                Ok(sig.as_ref().to_vec())
+            }
+            _ => Err(Error::DisallowedAlgorithm {
+                alg: format!(
+                    "{:?} does not match key family {:?}",
+                    algorithm,
+                    self.algorithm_family()
+                ),
+            }),
+        }
+    }
+
+    /// FIPS build: lazily build (and cache) the aws-lc-rs signer from the
+    /// stored secret, re-encoded to PKCS#8 DER. Returns a guard holding the
+    /// built signer; the first call builds it, later calls reuse the cache.
+    #[cfg(feature = "fips")]
+    fn aws_signer(&self) -> Result<std::sync::MutexGuard<'_, Option<AwsSigningKey>>, Error> {
+        let mut guard = self
+            .aws_signer
+            .lock()
+            .map_err(|_e| Error::InvalidConfiguration {
+                reason: "signer lock poisoned",
+            })?;
+        if guard.is_none() {
+            *guard = Some(self.build_aws_signer()?);
+        }
+        Ok(guard)
+    }
+
+    /// FIPS build: build the aws-lc-rs signer from the stored secret.
+    #[cfg(feature = "fips")]
+    fn build_aws_signer(&self) -> Result<AwsSigningKey, Error> {
+        use pkcs8::EncodePrivateKey as _;
+        match &self.inner {
+            KeyPairInner::Rsa(secret) => {
+                let der = secret.key.to_pkcs8_der().map_err(|_e| Error::InvalidConfiguration {
+                    reason: "failed to encode RSA private key",
+                })?;
+                RsaKeyPair::from_pkcs8(der.as_bytes())
+                    .map(AwsSigningKey::Rsa)
+                    .map_err(|_e| Error::InvalidConfiguration {
+                        reason: "aws-lc-rs rejected RSA key",
+                    })
+            }
+            KeyPairInner::EcdsaP256(secret) => {
+                let der = secret.key.to_pkcs8_der().map_err(|_e| Error::InvalidConfiguration {
+                    reason: "failed to encode P-256 private key",
+                })?;
+                EcdsaKeyPair::from_private_key_der(&ECDSA_P256_SHA256_FIXED_SIGNING, der.as_bytes())
+                    .map(AwsSigningKey::EcdsaP256)
+                    .map_err(|_e| Error::InvalidConfiguration {
+                        reason: "aws-lc-rs rejected P-256 key",
+                    })
+            }
+            KeyPairInner::EcdsaP384(secret) => {
+                let der = secret.key.to_pkcs8_der().map_err(|_e| Error::InvalidConfiguration {
+                    reason: "failed to encode P-384 private key",
+                })?;
+                EcdsaKeyPair::from_private_key_der(&ECDSA_P384_SHA384_FIXED_SIGNING, der.as_bytes())
+                    .map(AwsSigningKey::EcdsaP384)
+                    .map_err(|_e| Error::InvalidConfiguration {
+                        reason: "aws-lc-rs rejected P-384 key",
+                    })
+            }
         }
     }
 
@@ -513,6 +684,10 @@ pub(crate) fn oaep_padding(
     })
 }
 
+#[cfg_attr(
+    all(feature = "fips", not(feature = "weak-algos")),
+    expect(dead_code, reason = "pure-Rust RSA sign unused when FIPS routes all RSA through aws-lc-rs")
+)]
 fn sign_rsa<D>(key: &RsaPrivateKey, signed_bytes: &[u8]) -> Result<Vec<u8>, Error>
 where
     D: digest::Digest + const_oid::AssociatedOid,
