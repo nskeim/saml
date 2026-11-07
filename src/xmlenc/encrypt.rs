@@ -123,13 +123,11 @@ fn rsa_public_key_from_cert(cert: &X509Certificate) -> Result<PublicKey, Error> 
     PublicKey::from_pkcs1_der(key_bytes).map_err(|_err| Error::X509Parse)
 }
 
-/// Fill a buffer with cryptographically random bytes from the same fallible
-/// OS RNG used by the RSA encryption path.
+/// Fill a buffer with cryptographically random bytes, delegating to the
+/// crate's central entropy source (`crypto::entropy`) so FIPS builds draw
+/// from AWS-LC. RNG failure collapses to a generic reason.
 fn fill_random(buf: &mut [u8]) -> Result<(), Error> {
-    let mut rng = SysRng;
-    // Discarded intentionally: RNG failure detail is platform-specific and
-    // not useful to callers; collapse to a generic reason.
-    rng.try_fill_bytes(buf)
+    crate::crypto::entropy::try_fill_random(buf)
         .map_err(|_err| Error::DecryptFailed { reason: "rng" })
 }
 
