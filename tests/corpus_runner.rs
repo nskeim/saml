@@ -818,11 +818,54 @@ macro_rules! corpus_test {
             }
         }
     };
+    ($( #[$meta:meta] )* $name:ident, $idx:expr) => {
+        $( #[$meta] )*
+        #[test]
+        fn $name() {
+            let fx = &FIXTURES[$idx];
+            let result = run_fixture(fx);
+            match (fx.expected, result) {
+                (Expected::Ok, Ok(_)) => {}
+                (Expected::Reject, Err(_)) => {}
+                (Expected::Ok, Err(e)) => panic!(
+                    "[{}] expected Ok, got Err: {e}\n  fixture: {}",
+                    fx.label, fx.path
+                ),
+                (Expected::Reject, Ok(_)) => panic!(
+                    "[{}] expected Reject, got Ok — SECURITY ISSUE if the \
+                     fixture is an XSW / XXE / expired / audience-mismatch \
+                     case\n  fixture: {}",
+                    fx.label, fx.path
+                ),
+            }
+        }
+    };
 }
 
-corpus_test!(c01_adfs_sha256, 0);
-corpus_test!(c02_adfs_sha384, 1);
-corpus_test!(c03_adfs_sha512, 2);
+corpus_test!(
+    #[cfg_attr(
+        feature = "fips",
+        ignore = "ADFS fixture uses RSA-1024; FIPS 186 disallows RSA < 2048-bit signatures"
+    )]
+    c01_adfs_sha256,
+    0
+);
+corpus_test!(
+    #[cfg_attr(
+        feature = "fips",
+        ignore = "ADFS fixture uses RSA-1024; FIPS 186 disallows RSA < 2048-bit signatures"
+    )]
+    c02_adfs_sha384,
+    1
+);
+corpus_test!(
+    #[cfg_attr(
+        feature = "fips",
+        ignore = "ADFS fixture uses RSA-1024; FIPS 186 disallows RSA < 2048-bit signatures"
+    )]
+    c03_adfs_sha512,
+    2
+);
 corpus_test!(c04_adfs_sha1, 3);
 corpus_test!(c05_xsw_wrapped, 4);
 corpus_test!(c06_xsw_assertion_wrapped, 5);
