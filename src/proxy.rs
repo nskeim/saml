@@ -554,7 +554,9 @@ impl<S: ProxyContextStore> ProxyContextCodec for OpaqueHandleCodec<S> {
         let effective_ttl = self.ttl.min(remaining_lifetime);
         let mut bytes = vec![0u8; self.handle_byte_len];
         crate::crypto::entropy::try_fill_random(&mut bytes).map_err(|_err| {
-            Error::InvalidConfiguration { reason: "RNG failure generating proxy context handle" }
+            Error::InvalidConfiguration {
+                reason: "RNG failure generating proxy context handle",
+            }
         })?;
         let handle = URL_SAFE_NO_PAD.encode(&bytes);
         // Forward the grant rather than the payload: `put` is public, so a
@@ -771,7 +773,9 @@ impl Proxy<'_> {
                 })?;
         let mut transaction_id = [0u8; 16];
         crate::crypto::entropy::try_fill_random(&mut transaction_id).map_err(|_err| {
-            Error::InvalidConfiguration { reason: "RNG failure generating proxy transaction ID" }
+            Error::InvalidConfiguration {
+                reason: "RNG failure generating proxy transaction ID",
+            }
         })?;
 
         // 2. Build the ProxyContextPayload from the parsed downstream request.
