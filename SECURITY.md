@@ -101,9 +101,9 @@ validated module, linked statically into the binary. See **RFC-009**
 What a `fips` build changes:
 
 - **Routing.** Digests, the certificate SHA-256 fingerprint, all randomness,
-  RSA/ECDSA **signing and verification**, and the `xmlenc` AES-GCM/CBC and
-  RSA-OAEP key-transport paths run on AWS-LC (PRs A + B + C2). Only the proxy
-  HMAC-SHA-256 / AES-256-GCM codec remains on the pure-Rust backend (PR C3).
+  RSA/ECDSA **signing and verification**, the `xmlenc` AES-GCM/CBC and
+  RSA-OAEP key-transport paths, and the proxy HMAC-SHA-256 / AES-256-GCM
+  context codec all run on AWS-LC (PRs A + B + C2 + C3).
 - **Policy.** Unpaired RSA-OAEP (label hash ≠ MGF1 hash) is rejected at
   validation time, and sub-2048-bit RSA keys are rejected by the module at
   verify time. `weak-algos` is ignored for the default policy under `fips` —

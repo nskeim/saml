@@ -6,11 +6,17 @@
 
 use std::time::{Duration, SystemTime};
 
+#[cfg(not(feature = "fips"))]
 use aes_gcm::Aes256Gcm;
+#[cfg(not(feature = "fips"))]
 use aes_gcm::aead::{Aead, KeyInit, Payload};
+#[cfg(feature = "fips")]
+use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, UnboundKey};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+#[cfg(not(feature = "fips"))]
 use hmac::{Hmac, Mac};
+#[cfg(not(feature = "fips"))]
 use sha2::Sha256;
 
 use crate::attribute::Attribute;
@@ -361,17 +367,55 @@ impl Aes256GcmCodec {
     }
 }
 
+#[cfg(feature = "fips")]
+fn gcm_seal_fips(key: &[u8; 32], nonce: &[u8; 12], plaintext: &[u8]) -> Result<Vec<u8>, Error> {
+    let less_safe = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, key).map_err(|_err| {
+        Error::InvalidConfiguration {
+            reason: "AES-256-GCM key size mismatch",
+        }
+    })?);
+    let mut in_out = plaintext.to_vec();
+    less_safe
+        .seal_in_place_append_tag(
+            aws_lc_rs::aead::Nonce::assume_unique_for_key(*nonce),
+            Aad::empty(),
+            &mut in_out,
+        )
+        .map_err(|_err| Error::DecryptFailed {
+            reason: "proxy context",
+        })?;
+    Ok(in_out)
+}
+
+#[cfg(feature = "fips")]
+fn gcm_open_fips(key: &[u8; 32], nonce: &[u8], ct_with_tag: &[u8]) -> Result<Vec<u8>, Error> {
+    let nonce: [u8; 12] = nonce.try_into().map_err(|_err| Error::DecryptFailed {
+        reason: "proxy context",
+    })?;
+    let less_safe = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, key).map_err(|_err| {
+        Error::InvalidConfiguration {
+            reason: "AES-256-GCM key size mismatch",
+        }
+    })?);
+    let mut in_out = ct_with_tag.to_vec();
+    less_safe
+        .open_in_place(
+            aws_lc_rs::aead::Nonce::assume_unique_for_key(nonce),
+            Aad::empty(),
+            &mut in_out,
+        )
+        .map_err(|_err| Error::DecryptFailed {
+            reason: "proxy context",
+        })?;
+    Ok(in_out)
+}
+
 impl ProxyContextCodec for Aes256GcmCodec {
     fn encode(&self, grant: &SealingGrant<'_>) -> Result<String, Error> {
         let context = grant.payload();
         let plaintext =
             postcard::to_allocvec(context).map_err(|_err| Error::InvalidConfiguration {
                 reason: "proxy context serialize",
-            })?;
-
-        let cipher =
-            Aes256Gcm::new_from_slice(&self.key).map_err(|_err| Error::InvalidConfiguration {
-                reason: "AES-256-GCM key size mismatch",
             })?;
 
         // Random 12-byte nonce.
@@ -381,19 +425,29 @@ impl ProxyContextCodec for Aes256GcmCodec {
                 reason: "RNG failure generating proxy context nonce",
             }
         })?;
-        let nonce = aes_gcm::Nonce::from_slice(&nonce_bytes);
 
-        let ct_with_tag = cipher
-            .encrypt(
-                nonce,
-                Payload {
-                    msg: &plaintext,
-                    aad: &[],
-                },
-            )
-            .map_err(|_err| Error::DecryptFailed {
-                reason: "proxy context",
+        #[cfg(feature = "fips")]
+        let ct_with_tag = gcm_seal_fips(&self.key, &nonce_bytes, &plaintext)?;
+        #[cfg(not(feature = "fips"))]
+        let ct_with_tag = {
+            let cipher = Aes256Gcm::new_from_slice(&self.key).map_err(|_err| {
+                Error::InvalidConfiguration {
+                    reason: "AES-256-GCM key size mismatch",
+                }
             })?;
+            let nonce = aes_gcm::Nonce::from_slice(&nonce_bytes);
+            cipher
+                .encrypt(
+                    nonce,
+                    Payload {
+                        msg: &plaintext,
+                        aad: &[],
+                    },
+                )
+                .map_err(|_err| Error::DecryptFailed {
+                    reason: "proxy context",
+                })?
+        };
 
         let mut buf = Vec::with_capacity(12usize.saturating_add(ct_with_tag.len()));
         buf.extend_from_slice(&nonce_bytes);
@@ -415,21 +469,27 @@ impl ProxyContextCodec for Aes256GcmCodec {
         }
         let (nonce_bytes, ct_with_tag) = bytes.split_at(12);
 
-        let cipher =
-            Aes256Gcm::new_from_slice(&self.key).map_err(|_err| Error::InvalidConfiguration {
-                reason: "AES-256-GCM key size mismatch",
+        #[cfg(feature = "fips")]
+        let plaintext = gcm_open_fips(&self.key, nonce_bytes, ct_with_tag)?;
+        #[cfg(not(feature = "fips"))]
+        let plaintext = {
+            let cipher = Aes256Gcm::new_from_slice(&self.key).map_err(|_err| {
+                Error::InvalidConfiguration {
+                    reason: "AES-256-GCM key size mismatch",
+                }
             })?;
-        let plaintext = cipher
-            .decrypt(
-                aes_gcm::Nonce::from_slice(nonce_bytes),
-                Payload {
-                    msg: ct_with_tag,
-                    aad: &[],
-                },
-            )
-            .map_err(|_err| Error::DecryptFailed {
-                reason: "proxy context",
-            })?;
+            cipher
+                .decrypt(
+                    aes_gcm::Nonce::from_slice(nonce_bytes),
+                    Payload {
+                        msg: ct_with_tag,
+                        aad: &[],
+                    },
+                )
+                .map_err(|_err| Error::DecryptFailed {
+                    reason: "proxy context",
+                })?
+        };
 
         let context: ProxyContextPayload =
             postcard::from_bytes(&plaintext).map_err(|_err| Error::InvalidConfiguration {
@@ -1448,12 +1508,10 @@ impl NameIdTransform for PersistentPerSpHmac {
         _upstream_attributes: &[Attribute],
         downstream_sp: &SpDescriptor,
     ) -> Result<NameId, Error> {
-        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&self.key).map_err(|_err| {
-            Error::InvalidConfiguration {
-                reason: "HMAC-SHA256 key size mismatch",
-            }
-        })?;
-        mac.update(b"saml-proxy-persistent-nameid-v1\0");
+        // Versioned domain separator + fixed-width length prefixes so distinct
+        // tuples cannot alias. Both backends MAC the same concatenated stream.
+        let mut msg = Vec::new();
+        msg.extend_from_slice(b"saml-proxy-persistent-nameid-v1\0");
         for field in [
             upstream_idp_entity_id,
             upstream_subject.value.as_str(),
@@ -1462,10 +1520,26 @@ impl NameIdTransform for PersistentPerSpHmac {
             let len = u64::try_from(field.len()).map_err(|_err| Error::InvalidConfiguration {
                 reason: "PersistentPerSpHmac input exceeds u64 length",
             })?;
-            mac.update(&len.to_be_bytes());
-            mac.update(field.as_bytes());
+            msg.extend_from_slice(&len.to_be_bytes());
+            msg.extend_from_slice(field.as_bytes());
         }
-        let digest = mac.finalize().into_bytes();
+        #[cfg(feature = "fips")]
+        let digest = aws_lc_rs::hmac::sign(
+            &aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, &self.key),
+            &msg,
+        )
+        .as_ref()
+        .to_vec();
+        #[cfg(not(feature = "fips"))]
+        let digest = {
+            let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&self.key).map_err(|_err| {
+                Error::InvalidConfiguration {
+                    reason: "HMAC-SHA256 key size mismatch",
+                }
+            })?;
+            mac.update(&msg);
+            mac.finalize().into_bytes()
+        };
         let value = URL_SAFE_NO_PAD.encode(digest);
         Ok(NameId {
             value,
