@@ -36,9 +36,9 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-#[cfg(feature = "artifact-binding")]
+#[cfg(all(feature = "artifact-binding", not(feature = "fips")))]
 use aes_gcm::Aes256Gcm;
-#[cfg(feature = "artifact-binding")]
+#[cfg(all(feature = "artifact-binding", not(feature = "fips")))]
 use aes_gcm::aead::{Aead as _, KeyInit as _, Payload as AeadPayload};
 #[cfg(any(feature = "slo", feature = "artifact-binding"))]
 use base64::Engine as _;
@@ -1408,27 +1408,38 @@ impl ArtifactResolveTransaction {
             postcard::to_allocvec(&wire).map_err(|_err| Error::InvalidConfiguration {
                 reason: "artifact transaction serialize",
             })?;
-        let cipher =
-            Aes256Gcm::new_from_slice(key).map_err(|_err| Error::InvalidConfiguration {
-                reason: "AES-256-GCM key size mismatch",
-            })?;
         let mut nonce_bytes = [0u8; 12];
         crate::crypto::entropy::try_fill_random(&mut nonce_bytes).map_err(|_err| {
             Error::InvalidConfiguration {
                 reason: "RNG failure generating artifact transaction nonce",
             }
         })?;
-        let ciphertext = cipher
-            .encrypt(
-                aes_gcm::Nonce::from_slice(&nonce_bytes),
-                AeadPayload {
-                    msg: &plaintext,
-                    aad: b"saml-artifact-resolve-transaction-v1",
-                },
-            )
-            .map_err(|_err| Error::DecryptFailed {
-                reason: "artifact transaction",
-            })?;
+        #[cfg(feature = "fips")]
+        let ciphertext = crate::crypto::aead::gcm_seal(
+            key,
+            &nonce_bytes,
+            &plaintext,
+            b"saml-artifact-resolve-transaction-v1",
+            "artifact transaction",
+        )?;
+        #[cfg(not(feature = "fips"))]
+        let ciphertext = {
+            let cipher =
+                Aes256Gcm::new_from_slice(key).map_err(|_err| Error::InvalidConfiguration {
+                    reason: "AES-256-GCM key size mismatch",
+                })?;
+            cipher
+                .encrypt(
+                    aes_gcm::Nonce::from_slice(&nonce_bytes),
+                    AeadPayload {
+                        msg: &plaintext,
+                        aad: b"saml-artifact-resolve-transaction-v1",
+                    },
+                )
+                .map_err(|_err| Error::DecryptFailed {
+                    reason: "artifact transaction",
+                })?
+        };
         let mut bytes = Vec::with_capacity(12usize.saturating_add(ciphertext.len()));
         bytes.extend_from_slice(&nonce_bytes);
         bytes.extend_from_slice(&ciphertext);
@@ -1450,21 +1461,32 @@ impl ArtifactResolveTransaction {
             });
         }
         let (nonce, ciphertext) = bytes.split_at(12);
-        let cipher =
-            Aes256Gcm::new_from_slice(key).map_err(|_err| Error::InvalidConfiguration {
-                reason: "AES-256-GCM key size mismatch",
-            })?;
-        let plaintext = cipher
-            .decrypt(
-                aes_gcm::Nonce::from_slice(nonce),
-                AeadPayload {
-                    msg: ciphertext,
-                    aad: b"saml-artifact-resolve-transaction-v1",
-                },
-            )
-            .map_err(|_err| Error::DecryptFailed {
-                reason: "artifact transaction",
-            })?;
+        #[cfg(feature = "fips")]
+        let plaintext = crate::crypto::aead::gcm_open(
+            key,
+            nonce,
+            ciphertext,
+            b"saml-artifact-resolve-transaction-v1",
+            "artifact transaction",
+        )?;
+        #[cfg(not(feature = "fips"))]
+        let plaintext = {
+            let cipher =
+                Aes256Gcm::new_from_slice(key).map_err(|_err| Error::InvalidConfiguration {
+                    reason: "AES-256-GCM key size mismatch",
+                })?;
+            cipher
+                .decrypt(
+                    aes_gcm::Nonce::from_slice(nonce),
+                    AeadPayload {
+                        msg: ciphertext,
+                        aad: b"saml-artifact-resolve-transaction-v1",
+                    },
+                )
+                .map_err(|_err| Error::DecryptFailed {
+                    reason: "artifact transaction",
+                })?
+        };
         let wire: ArtifactResolveTransactionWire =
             postcard::from_bytes(&plaintext).map_err(|_err| Error::DecryptFailed {
                 reason: "artifact transaction",

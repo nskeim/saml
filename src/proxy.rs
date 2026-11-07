@@ -382,8 +382,13 @@ impl ProxyContextCodec for Aes256GcmCodec {
         })?;
 
         #[cfg(feature = "fips")]
-        let ct_with_tag =
-            crate::crypto::aead::gcm_seal(&self.key, &nonce_bytes, &plaintext, "proxy context")?;
+        let ct_with_tag = crate::crypto::aead::gcm_seal(
+            &self.key,
+            &nonce_bytes,
+            &plaintext,
+            &[],
+            "proxy context",
+        )?;
         #[cfg(not(feature = "fips"))]
         let ct_with_tag = {
             let cipher = Aes256Gcm::new_from_slice(&self.key).map_err(|_err| {
@@ -426,8 +431,13 @@ impl ProxyContextCodec for Aes256GcmCodec {
         let (nonce_bytes, ct_with_tag) = bytes.split_at(12);
 
         #[cfg(feature = "fips")]
-        let plaintext =
-            crate::crypto::aead::gcm_open(&self.key, nonce_bytes, ct_with_tag, "proxy context")?;
+        let plaintext = crate::crypto::aead::gcm_open(
+            &self.key,
+            nonce_bytes,
+            ct_with_tag,
+            &[],
+            "proxy context",
+        )?;
         #[cfg(not(feature = "fips"))]
         let plaintext = {
             let cipher = Aes256Gcm::new_from_slice(&self.key).map_err(|_err| {

@@ -53,6 +53,7 @@ Routing lands across three PRs. As of this RFC:
 | **HMAC-SHA-256** NameId transform | `proxy.rs` `PersistentPerSpHmac` | C3 | routed |
 | **AES-256-GCM** proxy context codec | `proxy.rs` `Aes256GcmCodec` | C3 | routed |
 | **AES-256-GCM** login tracker seal/open | `sp.rs` `LoginTrackerPayload` | C4 | routed |
+| **AES-256-GCM** artifact transaction seal/open | `idp.rs` `ArtifactResolveTransaction` | C5 | routed |
 
 The reference digest (`dsig/reference.rs`) and the certificate fingerprint both
 call `DigestAlgorithm::digest`, so they are FIPS-backed transitively from PR A —

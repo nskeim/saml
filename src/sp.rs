@@ -343,7 +343,8 @@ impl LoginTrackerPayload {
         })?;
 
         #[cfg(feature = "fips")]
-        let ct = crate::crypto::aead::gcm_seal(key, &nonce_bytes, &plaintext, "login tracker")?;
+        let ct =
+            crate::crypto::aead::gcm_seal(key, &nonce_bytes, &plaintext, &[], "login tracker")?;
         #[cfg(not(feature = "fips"))]
         let ct = {
             let cipher =
@@ -450,7 +451,7 @@ impl LoginTracker {
         let (nonce_bytes, ct) = bytes.split_at(12);
 
         #[cfg(feature = "fips")]
-        let plaintext = crate::crypto::aead::gcm_open(key, nonce_bytes, ct, "login tracker")?;
+        let plaintext = crate::crypto::aead::gcm_open(key, nonce_bytes, ct, &[], "login tracker")?;
         #[cfg(not(feature = "fips"))]
         let plaintext = {
             let cipher =
