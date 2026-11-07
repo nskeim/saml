@@ -50,8 +50,8 @@ Routing lands across three PRs. As of this RFC:
 | RSA / ECDSA **verification** (incl. `DefaultVerifier`, certificate binding) | `crypto/cert.rs` `PublicKey::verify_signature` | B | routed |
 | xmlenc **AES-GCM / AES-CBC** encrypt+decrypt | `xmlenc/{encrypt,decrypt}.rs` | C2 | routed |
 | **RSA-OAEP** key-transport decrypt (+ encrypt) | `crypto/keypair.rs` `decrypt_rsa_oaep`, `xmlenc/encrypt.rs` | C2 | routed |
-| **HMAC-SHA-256** NameId transform | `proxy.rs` `PersistentPerSpHmac` | C3 | deferred |
-| **AES-256-GCM** proxy context codec | `proxy.rs` `Aes256GcmCodec` | C3 | deferred |
+| **HMAC-SHA-256** NameId transform | `proxy.rs` `PersistentPerSpHmac` | C3 | routed |
+| **AES-256-GCM** proxy context codec | `proxy.rs` `Aes256GcmCodec` | C3 | routed |
 
 The reference digest (`dsig/reference.rs`) and the certificate fingerprint both
 call `DigestAlgorithm::digest`, so they are FIPS-backed transitively from PR A —
@@ -112,11 +112,13 @@ A FIPS build enforces the following at validation time (before any crypto runs):
 Routing signing and verification to AWS-LC (PR B) removes the pure-Rust `rsa`
 crate from those two paths in a FIPS build, which closes the
 RUSTSEC-2023-0071 "Marvin Attack" timing exposure on RSA **signing** and
-**verification**. The residual pure-Rust `rsa` exposure in a FIPS build is the
-**RSA-OAEP key-transport decryption** path (and the `xmlenc` AES paths), which
-remain on the pure-Rust backend until PR C2 routes them to AWS-LC. Until then, a
-FIPS build's OAEP decryption is not FIPS-backed; see `SECURITY.md` → "Known
-Advisories" for the full advisory text.
+**verification**. PRs C2 and C3 route the remaining paths — xmlenc AES-GCM/CBC,
+RSA-OAEP key transport, and the proxy HMAC-SHA-256 / AES-256-GCM codec — to
+AWS-LC as well, so a FIPS build's default posture runs every crypto primitive
+on the validated module. The only pure-Rust `rsa` code still reachable in a
+FIPS build is the legacy RSA-PKCS#1-v1.5 key-transport path, which `weak-algos`
+gates and the default policy refuses; see `SECURITY.md` → "Known Advisories"
+for the full advisory text.
 
 ## 6. Build requirements
 
