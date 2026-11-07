@@ -1414,7 +1414,9 @@ impl ArtifactResolveTransaction {
             })?;
         let mut nonce_bytes = [0u8; 12];
         crate::crypto::entropy::try_fill_random(&mut nonce_bytes).map_err(|_err| {
-            Error::InvalidConfiguration { reason: "RNG failure generating artifact transaction nonce" }
+            Error::InvalidConfiguration {
+                reason: "RNG failure generating artifact transaction nonce",
+            }
         })?;
         let ciphertext = cipher
             .encrypt(

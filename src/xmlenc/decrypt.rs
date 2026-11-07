@@ -8,14 +8,27 @@
 //! `PeerCryptoPolicy`); compile-time `weak-algos` only controls which
 //! variants exist — never which are accepted at runtime.
 
+#[cfg(not(feature = "fips"))]
 use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
+#[cfg(not(feature = "fips"))]
 use aes_gcm::aead::{Aead, KeyInit, Payload};
+#[cfg(not(feature = "fips"))]
 use aes_gcm::{Aes128Gcm, Aes256Gcm};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
 use crate::crypto::keypair::{KeyPair, OaepDigest};
 use crate::dsig::algorithms::PeerCryptoPolicy;
+
+#[cfg(feature = "fips")]
+use aws_lc_rs::aead::{AES_128_GCM, AES_256_GCM, Aad, LessSafeKey, UnboundKey};
+#[cfg(feature = "fips")]
+use aws_lc_rs::cipher::{
+    AES_128, AES_256, DecryptionContext, PaddedBlockDecryptingKey, UnboundCipherKey,
+};
+#[cfg(feature = "fips")]
+use aws_lc_rs::iv::FixedLength;
+
 use crate::error::Error;
 use crate::xml::parse::{Document, Element};
 use crate::xmlenc::algorithms::{DataEncryptionAlgorithm, KeyTransportAlgorithm};
@@ -329,14 +342,104 @@ fn decrypt_data(
     session_key: &[u8],
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, Error> {
-    match algorithm {
-        DataEncryptionAlgorithm::Aes128Cbc => decrypt_cbc::<aes::Aes128>(session_key, ciphertext),
-        DataEncryptionAlgorithm::Aes256Cbc => decrypt_cbc::<aes::Aes256>(session_key, ciphertext),
-        DataEncryptionAlgorithm::Aes128Gcm => decrypt_gcm::<Aes128Gcm>(session_key, ciphertext),
-        DataEncryptionAlgorithm::Aes256Gcm => decrypt_gcm::<Aes256Gcm>(session_key, ciphertext),
+    #[cfg(feature = "fips")]
+    {
+        match algorithm {
+            DataEncryptionAlgorithm::Aes128Cbc | DataEncryptionAlgorithm::Aes256Cbc => {
+                decrypt_cbc_fips(session_key, ciphertext, algorithm)
+            }
+            DataEncryptionAlgorithm::Aes128Gcm | DataEncryptionAlgorithm::Aes256Gcm => {
+                decrypt_gcm_fips(session_key, ciphertext, algorithm)
+            }
+        }
+    }
+    #[cfg(not(feature = "fips"))]
+    {
+        match algorithm {
+            DataEncryptionAlgorithm::Aes128Cbc => {
+                decrypt_cbc::<aes::Aes128>(session_key, ciphertext)
+            }
+            DataEncryptionAlgorithm::Aes256Cbc => {
+                decrypt_cbc::<aes::Aes256>(session_key, ciphertext)
+            }
+            DataEncryptionAlgorithm::Aes128Gcm => decrypt_gcm::<Aes128Gcm>(session_key, ciphertext),
+            DataEncryptionAlgorithm::Aes256Gcm => decrypt_gcm::<Aes256Gcm>(session_key, ciphertext),
+        }
     }
 }
 
+#[cfg(feature = "fips")]
+fn decrypt_cbc_fips(
+    session_key: &[u8],
+    ciphertext: &[u8],
+    algorithm: DataEncryptionAlgorithm,
+) -> Result<Vec<u8>, Error> {
+    if ciphertext.len() < 16 {
+        return Err(Error::DecryptFailed { reason: "data" });
+    }
+    let (iv, ct) = ciphertext.split_at(16);
+    let iv_arr: [u8; 16] = iv
+        .try_into()
+        .map_err(|_err| Error::DecryptFailed { reason: "data" })?;
+    let algo = match algorithm {
+        DataEncryptionAlgorithm::Aes128Cbc => &AES_128,
+        DataEncryptionAlgorithm::Aes256Cbc => &AES_256,
+        _ => {
+            return Err(Error::DisallowedAlgorithm {
+                alg: "not cbc".into(),
+            });
+        }
+    };
+    let key = UnboundCipherKey::new(algo, session_key).map_err(|_err| Error::DecryptFailed {
+        reason: "key size mismatch",
+    })?;
+    let dec_key =
+        PaddedBlockDecryptingKey::cbc_pkcs7(key).map_err(|_err| Error::DecryptFailed {
+            reason: "key size mismatch",
+        })?;
+    let context = DecryptionContext::Iv128(FixedLength::<16>::from(&iv_arr));
+    let mut buf = ct.to_vec();
+    let pt = dec_key
+        .decrypt(&mut buf, context)
+        .map_err(|_err| Error::DecryptFailed { reason: "data" })?;
+    Ok(pt.to_vec())
+}
+
+#[cfg(feature = "fips")]
+fn decrypt_gcm_fips(
+    session_key: &[u8],
+    ciphertext: &[u8],
+    algorithm: DataEncryptionAlgorithm,
+) -> Result<Vec<u8>, Error> {
+    if ciphertext.len() < 12 + 16 {
+        return Err(Error::DecryptFailed { reason: "data" });
+    }
+    let (nonce_bytes, ct_with_tag) = ciphertext.split_at(12);
+    let nonce_arr: [u8; 12] = nonce_bytes
+        .try_into()
+        .map_err(|_err| Error::DecryptFailed { reason: "data" })?;
+    let nonce = aws_lc_rs::aead::Nonce::assume_unique_for_key(nonce_arr);
+    let algo = match algorithm {
+        DataEncryptionAlgorithm::Aes128Gcm => &AES_128_GCM,
+        DataEncryptionAlgorithm::Aes256Gcm => &AES_256_GCM,
+        _ => {
+            return Err(Error::DisallowedAlgorithm {
+                alg: "not gcm".into(),
+            });
+        }
+    };
+    let key = UnboundKey::new(algo, session_key).map_err(|_err| Error::DecryptFailed {
+        reason: "key size mismatch",
+    })?;
+    let less_safe = LessSafeKey::new(key);
+    let mut buf = ct_with_tag.to_vec();
+    let pt = less_safe
+        .open_in_place(nonce, Aad::empty(), &mut buf)
+        .map_err(|_err| Error::DecryptFailed { reason: "data" })?;
+    Ok(pt.to_vec())
+}
+
+#[cfg(not(feature = "fips"))]
 fn decrypt_cbc<C>(session_key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, Error>
 where
     C: aes::cipher::BlockCipher + aes::cipher::BlockDecrypt + aes::cipher::KeyInit,
@@ -366,6 +469,7 @@ where
     Ok(out)
 }
 
+#[cfg(not(feature = "fips"))]
 fn decrypt_gcm<C>(session_key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, Error>
 where
     C: KeyInit + Aead,

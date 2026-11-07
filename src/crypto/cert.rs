@@ -25,10 +25,10 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use sha2::Digest as _;
 // Sha384/Sha512 are only used by the non-FIPS verifier; Sha256 is also used
 // by tests (fingerprint_is_stable).
-#[cfg(not(feature = "fips"))]
-use sha2::{Sha384, Sha512};
 #[cfg(any(not(feature = "fips"), test))]
 use sha2::Sha256;
+#[cfg(not(feature = "fips"))]
+use sha2::{Sha384, Sha512};
 use std::fmt;
 use std::time::SystemTime;
 
@@ -47,8 +47,7 @@ use x509_cert::der::{Decode as _, DecodePem, Encode as _};
 use aws_lc_rs::signature::{
     ECDSA_P256_SHA256_ASN1, ECDSA_P256_SHA256_FIXED, ECDSA_P384_SHA384_ASN1,
     ECDSA_P384_SHA384_FIXED, EcdsaVerificationAlgorithm, RSA_PKCS1_2048_8192_SHA256,
-    RSA_PKCS1_2048_8192_SHA384, RSA_PKCS1_2048_8192_SHA512, RsaParameters,
-    UnparsedPublicKey,
+    RSA_PKCS1_2048_8192_SHA384, RSA_PKCS1_2048_8192_SHA512, RsaParameters, UnparsedPublicKey,
 };
 
 use crate::dsig::algorithms::{DigestAlgorithm, SignatureAlgorithm};
@@ -304,7 +303,10 @@ pub struct PublicKey {
 // material is only used to discriminate the variant, not read.
 #[cfg_attr(
     feature = "fips",
-    expect(dead_code, reason = "FIPS verifies via spki_der; parsed key only discriminates variant")
+    expect(
+        dead_code,
+        reason = "FIPS verifies via spki_der; parsed key only discriminates variant"
+    )
 )]
 enum PublicKeyInner {
     Rsa(RsaPublicKey),
@@ -392,14 +394,13 @@ impl PublicKey {
         // FIPS build: RSA-SHA1 (weak-algos) has no aws-lc-rs verify const, so it
         // stays pure-Rust; everything else routes through aws-lc-rs.
         #[cfg(all(feature = "fips", feature = "weak-algos"))]
-        if let (PublicKeyInner::Rsa(rsa), SignatureAlgorithm::RsaSha1) = (&self.inner, algorithm)
-        {
-            let vk: RsaPkcs1v15VerifyingKey<sha1::Sha1> =
-                RsaPkcs1v15VerifyingKey::new(rsa.clone());
-            let sig = rsa::pkcs1v15::Signature::try_from(signature_bytes)
-                .map_err(|_e| Error::SignatureVerification {
+        if let (PublicKeyInner::Rsa(rsa), SignatureAlgorithm::RsaSha1) = (&self.inner, algorithm) {
+            let vk: RsaPkcs1v15VerifyingKey<sha1::Sha1> = RsaPkcs1v15VerifyingKey::new(rsa.clone());
+            let sig = rsa::pkcs1v15::Signature::try_from(signature_bytes).map_err(|_e| {
+                Error::SignatureVerification {
                     reason: "signature parse failed",
-                })?;
+                }
+            })?;
             return vk
                 .verify(signed_bytes, &sig)
                 .map_err(|_e| Error::SignatureVerification {
@@ -487,48 +488,38 @@ impl PublicKey {
         signature_bytes: &[u8],
     ) -> Result<(), Error> {
         match (&self.inner, algorithm) {
-            (PublicKeyInner::Rsa(_), SignatureAlgorithm::RsaSha256) => {
-                verify_rsa_fips(
-                    &RSA_PKCS1_2048_8192_SHA256,
-                    &self.spki_der,
-                    signed_bytes,
-                    signature_bytes,
-                )
-            }
-            (PublicKeyInner::Rsa(_), SignatureAlgorithm::RsaSha384) => {
-                verify_rsa_fips(
-                    &RSA_PKCS1_2048_8192_SHA384,
-                    &self.spki_der,
-                    signed_bytes,
-                    signature_bytes,
-                )
-            }
-            (PublicKeyInner::Rsa(_), SignatureAlgorithm::RsaSha512) => {
-                verify_rsa_fips(
-                    &RSA_PKCS1_2048_8192_SHA512,
-                    &self.spki_der,
-                    signed_bytes,
-                    signature_bytes,
-                )
-            }
-            (PublicKeyInner::EcdsaP256(_), SignatureAlgorithm::EcdsaSha256) => {
-                verify_ecdsa_fips(
-                    &ECDSA_P256_SHA256_FIXED,
-                    &ECDSA_P256_SHA256_ASN1,
-                    &self.spki_der,
-                    signed_bytes,
-                    signature_bytes,
-                )
-            }
-            (PublicKeyInner::EcdsaP384(_), SignatureAlgorithm::EcdsaSha384) => {
-                verify_ecdsa_fips(
-                    &ECDSA_P384_SHA384_FIXED,
-                    &ECDSA_P384_SHA384_ASN1,
-                    &self.spki_der,
-                    signed_bytes,
-                    signature_bytes,
-                )
-            }
+            (PublicKeyInner::Rsa(_), SignatureAlgorithm::RsaSha256) => verify_rsa_fips(
+                &RSA_PKCS1_2048_8192_SHA256,
+                &self.spki_der,
+                signed_bytes,
+                signature_bytes,
+            ),
+            (PublicKeyInner::Rsa(_), SignatureAlgorithm::RsaSha384) => verify_rsa_fips(
+                &RSA_PKCS1_2048_8192_SHA384,
+                &self.spki_der,
+                signed_bytes,
+                signature_bytes,
+            ),
+            (PublicKeyInner::Rsa(_), SignatureAlgorithm::RsaSha512) => verify_rsa_fips(
+                &RSA_PKCS1_2048_8192_SHA512,
+                &self.spki_der,
+                signed_bytes,
+                signature_bytes,
+            ),
+            (PublicKeyInner::EcdsaP256(_), SignatureAlgorithm::EcdsaSha256) => verify_ecdsa_fips(
+                &ECDSA_P256_SHA256_FIXED,
+                &ECDSA_P256_SHA256_ASN1,
+                &self.spki_der,
+                signed_bytes,
+                signature_bytes,
+            ),
+            (PublicKeyInner::EcdsaP384(_), SignatureAlgorithm::EcdsaSha384) => verify_ecdsa_fips(
+                &ECDSA_P384_SHA384_FIXED,
+                &ECDSA_P384_SHA384_ASN1,
+                &self.spki_der,
+                signed_bytes,
+                signature_bytes,
+            ),
             _ => Err(Error::SignatureVerification {
                 reason: "key/alg family mismatch",
             }),

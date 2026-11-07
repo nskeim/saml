@@ -34,6 +34,11 @@ use crate::error::Error;
 #[cfg(feature = "fips")]
 use aws_lc_rs::rand::SystemRandom;
 #[cfg(feature = "fips")]
+use aws_lc_rs::rsa::{
+    OAEP_SHA1_MGF1SHA1, OAEP_SHA256_MGF1SHA256, OAEP_SHA384_MGF1SHA384, OAEP_SHA512_MGF1SHA512,
+    OaepPrivateDecryptingKey, PrivateDecryptingKey,
+};
+#[cfg(feature = "fips")]
 use aws_lc_rs::signature::{
     ECDSA_P256_SHA256_FIXED_SIGNING, ECDSA_P384_SHA384_FIXED_SIGNING, EcdsaKeyPair,
     RSA_PKCS1_SHA256, RSA_PKCS1_SHA384, RSA_PKCS1_SHA512, RsaKeyPair,
@@ -390,8 +395,7 @@ impl KeyPair {
         // FIPS build: RSA-SHA1 (weak-algos) has no aws-lc-rs signing const, so
         // it stays pure-Rust; everything else routes through aws-lc-rs.
         #[cfg(all(feature = "fips", feature = "weak-algos"))]
-        if let (KeyPairInner::Rsa(secret), SignatureAlgorithm::RsaSha1) = (&self.inner, algorithm)
-        {
+        if let (KeyPairInner::Rsa(secret), SignatureAlgorithm::RsaSha1) = (&self.inner, algorithm) {
             return sign_rsa::<sha1::Sha1>(&secret.key, signed_bytes);
         }
         #[cfg(feature = "fips")]
@@ -454,7 +458,7 @@ impl KeyPair {
         let Some(key) = guard.as_ref() else {
             return Err(Error::InvalidConfiguration {
                 reason: "signer not initialized",
-            })
+            });
         };
         let rng = SystemRandom::new();
         match (key, algorithm) {
@@ -483,19 +487,19 @@ impl KeyPair {
                 Ok(sig)
             }
             (AwsSigningKey::EcdsaP256(kp), SignatureAlgorithm::EcdsaSha256) => {
-                let sig = kp.sign(&rng, signed_bytes).map_err(|_e| {
-                    Error::SignatureVerification {
-                        reason: "ecdsa sign failed",
-                    }
-                })?;
+                let sig =
+                    kp.sign(&rng, signed_bytes)
+                        .map_err(|_e| Error::SignatureVerification {
+                            reason: "ecdsa sign failed",
+                        })?;
                 Ok(sig.as_ref().to_vec())
             }
             (AwsSigningKey::EcdsaP384(kp), SignatureAlgorithm::EcdsaSha384) => {
-                let sig = kp.sign(&rng, signed_bytes).map_err(|_e| {
-                    Error::SignatureVerification {
-                        reason: "ecdsa sign failed",
-                    }
-                })?;
+                let sig =
+                    kp.sign(&rng, signed_bytes)
+                        .map_err(|_e| Error::SignatureVerification {
+                            reason: "ecdsa sign failed",
+                        })?;
                 Ok(sig.as_ref().to_vec())
             }
             _ => Err(Error::DisallowedAlgorithm {
@@ -531,9 +535,12 @@ impl KeyPair {
         use pkcs8::EncodePrivateKey as _;
         match &self.inner {
             KeyPairInner::Rsa(secret) => {
-                let der = secret.key.to_pkcs8_der().map_err(|_e| Error::InvalidConfiguration {
-                    reason: "failed to encode RSA private key",
-                })?;
+                let der = secret
+                    .key
+                    .to_pkcs8_der()
+                    .map_err(|_e| Error::InvalidConfiguration {
+                        reason: "failed to encode RSA private key",
+                    })?;
                 RsaKeyPair::from_pkcs8(der.as_bytes())
                     .map(AwsSigningKey::Rsa)
                     .map_err(|_e| Error::InvalidConfiguration {
@@ -541,9 +548,12 @@ impl KeyPair {
                     })
             }
             KeyPairInner::EcdsaP256(secret) => {
-                let der = secret.key.to_pkcs8_der().map_err(|_e| Error::InvalidConfiguration {
-                    reason: "failed to encode P-256 private key",
-                })?;
+                let der = secret
+                    .key
+                    .to_pkcs8_der()
+                    .map_err(|_e| Error::InvalidConfiguration {
+                        reason: "failed to encode P-256 private key",
+                    })?;
                 EcdsaKeyPair::from_private_key_der(&ECDSA_P256_SHA256_FIXED_SIGNING, der.as_bytes())
                     .map(AwsSigningKey::EcdsaP256)
                     .map_err(|_e| Error::InvalidConfiguration {
@@ -551,9 +561,12 @@ impl KeyPair {
                     })
             }
             KeyPairInner::EcdsaP384(secret) => {
-                let der = secret.key.to_pkcs8_der().map_err(|_e| Error::InvalidConfiguration {
-                    reason: "failed to encode P-384 private key",
-                })?;
+                let der = secret
+                    .key
+                    .to_pkcs8_der()
+                    .map_err(|_e| Error::InvalidConfiguration {
+                        reason: "failed to encode P-384 private key",
+                    })?;
                 EcdsaKeyPair::from_private_key_der(&ECDSA_P384_SHA384_FIXED_SIGNING, der.as_bytes())
                     .map(AwsSigningKey::EcdsaP384)
                     .map_err(|_e| Error::InvalidConfiguration {
@@ -572,6 +585,10 @@ impl KeyPair {
     /// rather than being pinned to one function. Passing the same value for
     /// both yields the common-case profile.
     #[cfg(feature = "xmlenc")]
+    #[expect(
+        clippy::needless_return,
+        reason = "FIPS branch returns before the pure-Rust fallback"
+    )]
     pub fn decrypt_rsa_oaep(
         &self,
         ciphertext: &[u8],
@@ -583,17 +600,64 @@ impl KeyPair {
                 reason: "key transport",
             });
         };
-        // SHA-1 OAEP/MGF1 needs the `sha1` crate, which is only compiled in
-        // under `weak-algos`; `oaep_padding` rejects it otherwise so an
-        // unsupported build fails deterministically rather than silently
-        // substituting a different hash.
-        let padding = oaep_padding(oaep_digest, mgf1_digest)?;
-        secret
-            .key
-            .decrypt(padding, ciphertext)
-            .map_err(|_e| Error::DecryptFailed {
-                reason: "key transport",
-            })
+
+        #[cfg(feature = "fips")]
+        {
+            use pkcs8::EncodePrivateKey as _;
+            let oaep_alg = match (oaep_digest, mgf1_digest) {
+                (OaepDigest::Sha1, OaepDigest::Sha1) => &OAEP_SHA1_MGF1SHA1,
+                (OaepDigest::Sha256, OaepDigest::Sha256) => &OAEP_SHA256_MGF1SHA256,
+                (OaepDigest::Sha384, OaepDigest::Sha384) => &OAEP_SHA384_MGF1SHA384,
+                (OaepDigest::Sha512, OaepDigest::Sha512) => &OAEP_SHA512_MGF1SHA512,
+                _ => {
+                    return Err(Error::DisallowedAlgorithm {
+                        alg: format!(
+                            "unpaired RSA-OAEP ({} / {}) is not supported under FIPS",
+                            oaep_digest.uri(),
+                            mgf1_digest.mgf1_uri()
+                        ),
+                    });
+                }
+            };
+            let der = secret
+                .key
+                .to_pkcs8_der()
+                .map_err(|_e| Error::InvalidConfiguration {
+                    reason: "failed to encode RSA private key",
+                })?;
+            let private_key = PrivateDecryptingKey::from_pkcs8(der.as_bytes()).map_err(|_e| {
+                Error::InvalidConfiguration {
+                    reason: "aws-lc-rs rejected RSA key",
+                }
+            })?;
+            let oaep_key = OaepPrivateDecryptingKey::new(private_key).map_err(|_e| {
+                Error::InvalidConfiguration {
+                    reason: "aws-lc-rs rejected RSA-OAEP key",
+                }
+            })?;
+            let mut out = vec![0u8; oaep_key.min_output_size()];
+            let written = oaep_key
+                .decrypt(oaep_alg, ciphertext, &mut out, None)
+                .map_err(|_e| Error::DecryptFailed {
+                    reason: "key transport",
+                })?;
+            return Ok(written.to_vec());
+        }
+
+        #[cfg(not(feature = "fips"))]
+        {
+            // SHA-1 OAEP/MGF1 needs the `sha1` crate, which is only compiled in
+            // under `weak-algos`; `oaep_padding` rejects it otherwise so an
+            // unsupported build fails deterministically rather than silently
+            // substituting a different hash.
+            let padding = oaep_padding(oaep_digest, mgf1_digest)?;
+            secret
+                .key
+                .decrypt(padding, ciphertext)
+                .map_err(|_e| Error::DecryptFailed {
+                    reason: "key transport",
+                })
+        }
     }
 
     /// RSA-PKCS1-v1.5 key transport unwrap. Used only for legacy interop with
@@ -631,6 +695,10 @@ impl KeyPair {
 /// SHA-1 in either position requires `weak-algos`; without it the request is
 /// refused rather than served with a different hash.
 #[cfg(feature = "xmlenc")]
+#[cfg_attr(
+    all(feature = "fips", not(test)),
+    expect(dead_code, reason = "pure-Rust OAEP helper unused under FIPS")
+)]
 #[cfg_attr(
     feature = "weak-algos",
     expect(
@@ -686,7 +754,10 @@ pub(crate) fn oaep_padding(
 
 #[cfg_attr(
     all(feature = "fips", not(feature = "weak-algos")),
-    expect(dead_code, reason = "pure-Rust RSA sign unused when FIPS routes all RSA through aws-lc-rs")
+    expect(
+        dead_code,
+        reason = "pure-Rust RSA sign unused when FIPS routes all RSA through aws-lc-rs"
+    )
 )]
 fn sign_rsa<D>(key: &RsaPrivateKey, signed_bytes: &[u8]) -> Result<Vec<u8>, Error>
 where

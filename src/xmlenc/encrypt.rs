@@ -10,25 +10,37 @@
 //! Algorithm defaults (RFC-002 §7.2): `Aes256Gcm` + `RsaOaep` with SHA-256.
 //! CBC and MGF1-SHA1 are kept for compatibility but not promoted.
 
+#[cfg(not(feature = "fips"))]
 use aes::cipher::{BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
+#[cfg(not(feature = "fips"))]
 use aes_gcm::aead::{Aead, KeyInit, Payload};
+#[cfg(not(feature = "fips"))]
 use aes_gcm::{Aes128Gcm, Aes256Gcm};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use rsa::RsaPublicKey;
 use rsa::pkcs1::DecodeRsaPublicKey as _;
-use rsa::rand_core::OsRng;
-#[cfg(feature = "weak-algos")]
+#[cfg(all(feature = "weak-algos", not(feature = "fips")))]
 use sha1::Sha1;
+#[cfg(not(feature = "fips"))]
 use sha2::Sha256;
 use x509_cert::Certificate;
 use x509_cert::der::Decode as _;
 
 use crate::crypto::cert::{PublicKeyAlgorithm, X509Certificate};
 use crate::error::Error;
+
 use crate::xml::emit::emit_element;
 use crate::xml::parse::{Element, Node, QName};
 use crate::xmlenc::algorithms::{DataEncryptionAlgorithm, KeyTransportAlgorithm};
+#[cfg(feature = "fips")]
+use aws_lc_rs::aead::{AES_128_GCM, AES_256_GCM, Aad, LessSafeKey, UnboundKey};
+#[cfg(feature = "fips")]
+use aws_lc_rs::cipher::{AES_128, AES_256};
+#[cfg(feature = "fips")]
+use aws_lc_rs::rsa::{
+    OAEP_SHA1_MGF1SHA1, OAEP_SHA256_MGF1SHA256, OaepPublicEncryptingKey, PublicEncryptingKey,
+};
 
 // =============================================================================
 // Namespace URIs and element local-names used by the emitted subtree.
@@ -70,6 +82,7 @@ pub(crate) fn encrypt_assertion(
             alg: "key transport requires RSA cert".into(),
         });
     }
+    #[cfg(not(feature = "fips"))]
     let rsa_public = rsa_public_key_from_cert(recipient_encryption_cert)?;
 
     // -- 2. Serialize the assertion to bytes. --
@@ -87,6 +100,13 @@ pub(crate) fn encrypt_assertion(
     let data_cipher_b64 = BASE64_STANDARD.encode(&cipher_value);
 
     // -- 5. Wrap session key under recipient's RSA public key. --
+    #[cfg(feature = "fips")]
+    let wrapped_key_bytes = wrap_session_key_fips(
+        recipient_encryption_cert.subject_public_key_info_der(),
+        key_transport_algorithm,
+        &session_key,
+    )?;
+    #[cfg(not(feature = "fips"))]
     let wrapped_key_bytes = wrap_session_key(&rsa_public, key_transport_algorithm, &session_key)?;
     let wrapped_key_b64 = BASE64_STANDARD.encode(&wrapped_key_bytes);
 
@@ -103,6 +123,10 @@ pub(crate) fn encrypt_assertion(
 // Internal helpers
 // =============================================================================
 
+#[cfg_attr(
+    all(feature = "fips", not(test)),
+    expect(dead_code, reason = "pure-Rust helper unused under FIPS")
+)]
 /// Extract an `RsaPublicKey` from an X.509 certificate.
 ///
 /// Goes via the cert's canonical DER so we don't need access to the cert's
@@ -138,18 +162,33 @@ fn encrypt_data(
     session_key: &[u8],
     plaintext: &[u8],
 ) -> Result<(Vec<u8>, Vec<u8>), Error> {
-    match algorithm {
-        DataEncryptionAlgorithm::Aes128Cbc => {
-            encrypt_cbc_with_random_iv::<aes::Aes128>(session_key, plaintext)
+    #[cfg(feature = "fips")]
+    {
+        match algorithm {
+            DataEncryptionAlgorithm::Aes128Cbc | DataEncryptionAlgorithm::Aes256Cbc => {
+                encrypt_cbc_fips(session_key, plaintext, algorithm)
+            }
+            DataEncryptionAlgorithm::Aes128Gcm | DataEncryptionAlgorithm::Aes256Gcm => {
+                encrypt_gcm_fips(session_key, plaintext, algorithm)
+            }
         }
-        DataEncryptionAlgorithm::Aes256Cbc => {
-            encrypt_cbc_with_random_iv::<aes::Aes256>(session_key, plaintext)
+    }
+    #[cfg(not(feature = "fips"))]
+    {
+        match algorithm {
+            DataEncryptionAlgorithm::Aes128Cbc => {
+                encrypt_cbc_with_random_iv::<aes::Aes128>(session_key, plaintext)
+            }
+            DataEncryptionAlgorithm::Aes256Cbc => {
+                encrypt_cbc_with_random_iv::<aes::Aes256>(session_key, plaintext)
+            }
+            DataEncryptionAlgorithm::Aes128Gcm => encrypt_gcm::<Aes128Gcm>(session_key, plaintext),
+            DataEncryptionAlgorithm::Aes256Gcm => encrypt_gcm::<Aes256Gcm>(session_key, plaintext),
         }
-        DataEncryptionAlgorithm::Aes128Gcm => encrypt_gcm::<Aes128Gcm>(session_key, plaintext),
-        DataEncryptionAlgorithm::Aes256Gcm => encrypt_gcm::<Aes256Gcm>(session_key, plaintext),
     }
 }
 
+#[cfg(not(feature = "fips"))]
 fn encrypt_cbc_with_random_iv<C>(
     session_key: &[u8],
     plaintext: &[u8],
@@ -163,6 +202,7 @@ where
     Ok((iv, ct))
 }
 
+#[cfg(not(feature = "fips"))]
 fn encrypt_gcm<C>(session_key: &[u8], plaintext: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error>
 where
     C: KeyInit + Aead,
@@ -187,6 +227,7 @@ where
     Ok((nonce, ct))
 }
 
+#[cfg(not(feature = "fips"))]
 fn encrypt_cbc<C>(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, Error>
 where
     C: aes::cipher::BlockCipher + aes::cipher::BlockEncrypt + aes::cipher::KeyInit,
@@ -214,6 +255,106 @@ where
     Ok(out)
 }
 
+#[cfg(feature = "fips")]
+fn encrypt_cbc_fips(
+    session_key: &[u8],
+    plaintext: &[u8],
+    algorithm: DataEncryptionAlgorithm,
+) -> Result<(Vec<u8>, Vec<u8>), Error> {
+    use aws_lc_rs::cipher::{EncryptionContext, PaddedBlockEncryptingKey, UnboundCipherKey};
+    use aws_lc_rs::iv::FixedLength;
+    let algo = match algorithm {
+        DataEncryptionAlgorithm::Aes128Cbc => &AES_128,
+        DataEncryptionAlgorithm::Aes256Cbc => &AES_256,
+        _ => {
+            return Err(Error::DisallowedAlgorithm {
+                alg: "not cbc".into(),
+            });
+        }
+    };
+    let key = UnboundCipherKey::new(algo, session_key).map_err(|_err| Error::DecryptFailed {
+        reason: "key size mismatch",
+    })?;
+    let enc_key =
+        PaddedBlockEncryptingKey::cbc_pkcs7(key).map_err(|_err| Error::DecryptFailed {
+            reason: "key size mismatch",
+        })?;
+    let mut iv_bytes = [0u8; 16];
+    crate::crypto::entropy::try_fill_random(&mut iv_bytes)
+        .map_err(|_err| Error::DecryptFailed { reason: "rng" })?;
+    let context = EncryptionContext::Iv128(FixedLength::<16>::from(&iv_bytes));
+    let mut in_out = plaintext.to_vec();
+    enc_key
+        .less_safe_encrypt(&mut in_out, context)
+        .map_err(|_err| Error::DecryptFailed { reason: "data" })?;
+    Ok((iv_bytes.to_vec(), in_out))
+}
+
+#[cfg(feature = "fips")]
+fn encrypt_gcm_fips(
+    session_key: &[u8],
+    plaintext: &[u8],
+    algorithm: DataEncryptionAlgorithm,
+) -> Result<(Vec<u8>, Vec<u8>), Error> {
+    let algo = match algorithm {
+        DataEncryptionAlgorithm::Aes128Gcm => &AES_128_GCM,
+        DataEncryptionAlgorithm::Aes256Gcm => &AES_256_GCM,
+        _ => {
+            return Err(Error::DisallowedAlgorithm {
+                alg: "not gcm".into(),
+            });
+        }
+    };
+    let key = UnboundKey::new(algo, session_key).map_err(|_err| Error::DecryptFailed {
+        reason: "key size mismatch",
+    })?;
+    let less_safe = LessSafeKey::new(key);
+    let mut nonce_bytes = [0u8; 12];
+    crate::crypto::entropy::try_fill_random(&mut nonce_bytes)
+        .map_err(|_err| Error::DecryptFailed { reason: "rng" })?;
+    let nonce = aws_lc_rs::aead::Nonce::assume_unique_for_key(nonce_bytes);
+    let mut in_out = plaintext.to_vec();
+    less_safe
+        .seal_in_place_append_tag(nonce, Aad::empty(), &mut in_out)
+        .map_err(|_err| Error::DecryptFailed { reason: "data" })?;
+    Ok((nonce_bytes.to_vec(), in_out))
+}
+
+#[cfg(feature = "fips")]
+fn wrap_session_key_fips(
+    spki_der: &[u8],
+    algorithm: KeyTransportAlgorithm,
+    session_key: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let public_key = PublicEncryptingKey::from_der(spki_der).map_err(|_err| Error::X509Parse)?;
+    let oaep_public = OaepPublicEncryptingKey::new(public_key).map_err(|_err| Error::X509Parse)?;
+    match algorithm {
+        KeyTransportAlgorithm::RsaOaep => {
+            let mut ct = vec![0u8; oaep_public.ciphertext_size()];
+            let written = oaep_public
+                .encrypt(&OAEP_SHA256_MGF1SHA256, session_key, &mut ct, None)
+                .map_err(|_err| Error::DecryptFailed {
+                    reason: "key transport",
+                })?;
+            Ok(written.to_vec())
+        }
+        KeyTransportAlgorithm::RsaOaepMgf1Sha1 => {
+            let mut ct = vec![0u8; oaep_public.ciphertext_size()];
+            let written = oaep_public
+                .encrypt(&OAEP_SHA1_MGF1SHA1, session_key, &mut ct, None)
+                .map_err(|_err| Error::DecryptFailed {
+                    reason: "key transport",
+                })?;
+            Ok(written.to_vec())
+        }
+        #[cfg(feature = "weak-algos")]
+        KeyTransportAlgorithm::RsaPkcs1V15 => Err(Error::DisallowedAlgorithm {
+            alg: "RSA-PKCS1-v1.5 outbound key transport is not supported".into(),
+        }),
+    }
+}
+
+#[cfg(not(feature = "fips"))]
 /// Wrap the session key under the recipient's RSA public key.
 ///
 /// `RsaOaep` is the modern XML-Enc 1.1 variant: `rsa::Oaep::new::<Sha256>()`
@@ -231,7 +372,7 @@ fn wrap_session_key(
     algorithm: KeyTransportAlgorithm,
     session_key: &[u8],
 ) -> Result<Vec<u8>, Error> {
-    let mut rng = OsRng;
+    let mut rng = rsa::rand_core::OsRng;
     match algorithm {
         KeyTransportAlgorithm::RsaOaep => {
             let padding = rsa::Oaep::new::<Sha256>();
@@ -483,7 +624,7 @@ pub(crate) fn encrypt_assertion_with_declared_oaep_params(
     // decrypt side uses, so a round-trip proves both directions agree.
     let padding =
         crate::crypto::keypair::oaep_padding(params.effective_digest(), params.effective_mgf1())?;
-    let mut rng = OsRng;
+    let mut rng = rsa::rand_core::OsRng;
     let wrapped_key_bytes = padding
         .encrypt(&mut rng, &rsa_public, &session_key)
         .map_err(|_err| Error::DecryptFailed {
