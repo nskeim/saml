@@ -48,8 +48,8 @@ Routing lands across three PRs. As of this RFC:
 | xmlenc AES key/IV/nonce randomness | `xmlenc/encrypt.rs` | A | routed (via `entropy`) |
 | RSA / ECDSA **signing** | `crypto/keypair.rs` `KeyPair::sign` | B | routed |
 | RSA / ECDSA **verification** (incl. `DefaultVerifier`, certificate binding) | `crypto/cert.rs` `PublicKey::verify_signature` | B | routed |
-| xmlenc **AES-GCM / AES-CBC** encrypt+decrypt | `xmlenc/{encrypt,decrypt}.rs` | C2 | deferred |
-| **RSA-OAEP** key-transport decrypt (+ encrypt) | `crypto/keypair.rs` `decrypt_rsa_oaep`, `xmlenc/encrypt.rs` | C2 | deferred |
+| xmlenc **AES-GCM / AES-CBC** encrypt+decrypt | `xmlenc/{encrypt,decrypt}.rs` | C2 | routed |
+| **RSA-OAEP** key-transport decrypt (+ encrypt) | `crypto/keypair.rs` `decrypt_rsa_oaep`, `xmlenc/encrypt.rs` | C2 | routed |
 | **HMAC-SHA-256** NameId transform | `proxy.rs` `PersistentPerSpHmac` | C3 | deferred |
 | **AES-256-GCM** proxy context codec | `proxy.rs` `Aes256GcmCodec` | C3 | deferred |
 
