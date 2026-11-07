@@ -318,6 +318,13 @@ impl PeerCryptoPolicy {
     ///   RFC 8017 / XML Encryption 1.1 default and is a separate parameter
     ///   from the message digest — see
     ///   [`OaepDigest::MGF1_DEFAULTS`](crate::OaepDigest::MGF1_DEFAULTS).
+    ///
+    /// These defaults are FIPS-compliant: no SHA-1 signature or digest and no
+    /// PKCS1-v1.5 key transport, so the default posture stays FIPS-compliant
+    /// under the `fips` feature even when `weak-algos` is compiled in. The one
+    /// FIPS-specific restriction is enforced at validation time, not here: under
+    /// `fips`, unpaired RSA-OAEP (label hash ≠ MGF1 hash) is rejected because
+    /// AWS-LC supports only paired OAEP (see RFC-009).
     pub fn strong_defaults() -> Self {
         Self {
             allowed_signature_algorithms: SignatureAlgorithm::DEFAULTS.to_vec(),

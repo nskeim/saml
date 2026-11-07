@@ -91,6 +91,34 @@ The following are **out of scope** — protect against them at a higher layer:
 - **Identity provider correctness.** If the IdP issues an assertion for the
   wrong subject, no SP-side check can detect it.
 
+## FIPS Mode
+
+The `fips` Cargo feature routes the crate's cryptographic primitives through
+**AWS-LC** (the `aws-lc-rs` binding with its `fips` feature), the FIPS 140-3
+validated module, linked statically into the binary. See **RFC-009**
+(`docs/rfcs/RFC-009-fips.md`) for the full posture.
+
+What a `fips` build changes:
+
+- **Routing.** Digests, the certificate SHA-256 fingerprint, all randomness, and
+  RSA/ECDSA **signing and verification** run on AWS-LC (PRs A + B). The
+  `xmlenc` AES-GCM/CBC and RSA-OAEP key-transport paths, and the proxy
+  HMAC-SHA-256 / AES-256-GCM codec, remain on the pure-Rust backend until PRs
+  C2/C3 route them.
+- **Policy.** Unpaired RSA-OAEP (label hash ≠ MGF1 hash) is rejected at
+  validation time, and sub-2048-bit RSA keys are rejected by the module at
+  verify time. `weak-algos` is ignored for the default policy under `fips` —
+  `PeerCryptoPolicy::strong_defaults()` never lists SHA-1 or PKCS1-v1.5, so the
+  default posture is FIPS-compliant even if `weak-algos` is compiled in.
+
+**Effect on the `rsa` advisory.** Routing signing and verification to AWS-LC
+removes the pure-Rust `rsa` crate from those two paths in a FIPS build, closing
+the RUSTSEC-2023-0071 (Marvin) timing exposure on RSA signing and verification.
+The residual pure-Rust `rsa` exposure in a FIPS build is the **RSA-OAEP
+key-transport decryption** path (plus the `xmlenc` AES paths), which stays on the
+pure-Rust backend until PR C2. Until then, a FIPS build's OAEP decryption is not
+FIPS-backed; the advisory remains accepted and documented (below).
+
 ## Known Advisories
 
 The dependency audit (`cargo audit` / `cargo deny`) carries one accepted,

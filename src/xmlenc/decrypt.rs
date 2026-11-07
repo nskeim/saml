@@ -168,6 +168,22 @@ pub(crate) fn decrypt_encrypted_assertion(
                 alg: mgf1_digest.mgf1_uri().to_owned(),
             });
         }
+
+        // FIPS (aws-lc-rs) supports only *paired* OAEP — the label hash and the
+        // MGF1 hash must be the same digest. The two allow-lists above are
+        // deliberately independent (so a peer can permit SHA-256 + MGF1-SHA1
+        // without permitting SHA-1 as a message digest), so the pairing is
+        // enforced here rather than by the lists.
+        #[cfg(feature = "fips")]
+        if oaep_digest != mgf1_digest {
+            return Err(Error::DisallowedAlgorithm {
+                alg: format!(
+                    "OAEP digest {} and MGF1 {} must match under FIPS",
+                    oaep_digest.uri(),
+                    mgf1_digest.mgf1_uri()
+                ),
+            });
+        }
     }
 
     // -- 5. Base64-decode the wrapped session key. --
@@ -578,6 +594,10 @@ mod tests {
     /// express. Deriving MGF1 from `<ds:DigestMethod>` would build SHA-256 /
     /// SHA-256 padding and fail to unwrap.
     #[cfg(feature = "weak-algos")]
+    #[cfg_attr(
+        feature = "fips",
+        ignore = "unpaired OAEP is rejected under FIPS (AWS-LC supports only paired OAEP); see fips_rejects_unpaired_oaep"
+    )]
     #[test]
     fn rsa_oaep_sha256_digest_with_explicit_mgf1_sha1() {
         let encrypted = encrypt_declaring(
@@ -598,10 +618,42 @@ mod tests {
         assert_eq!(decrypted.qname().local(), "Assertion");
     }
 
+    /// Under FIPS the aws-lc-rs module supports only *paired* OAEP (label hash
+    /// == MGF1 hash). SHA-256 digest + MGF1-SHA-384 is unpaired and must be
+    /// rejected even though the policy explicitly allows both values — the
+    /// pairing is enforced at validation time, before any crypto runs.
+    #[cfg(feature = "fips")]
+    #[test]
+    fn fips_rejects_unpaired_oaep() {
+        let encrypted = encrypt_declaring(
+            KeyTransportAlgorithm::RsaOaep,
+            DeclaredOaepParams {
+                digest: Some(OaepDigest::Sha256),
+                mgf1: Some(OaepDigest::Sha384),
+            },
+        );
+        let key = rsa_keypair();
+
+        let err = decrypt_encrypted_assertion(
+            &encrypted,
+            &[&key],
+            &oaep_policy(OaepDigest::Sha256, OaepDigest::Sha384),
+        )
+        .expect_err("unpaired OAEP must be rejected under FIPS");
+        assert!(
+            matches!(err, Error::DisallowedAlgorithm { .. }),
+            "expected DisallowedAlgorithm for unpaired OAEP"
+        );
+    }
+
     /// The same combination reached via the §5.5.2 default: an omitted
     /// `<xenc11:MGF>` under `#rsa-oaep` means MGF1-SHA1, not "same hash as
     /// the digest".
     #[cfg(feature = "weak-algos")]
+    #[cfg_attr(
+        feature = "fips",
+        ignore = "unpaired OAEP is rejected under FIPS (AWS-LC supports only paired OAEP); see fips_rejects_unpaired_oaep"
+    )]
     #[test]
     fn rsa_oaep_omitted_mgf_defaults_to_mgf1_sha1() {
         let encrypted = encrypt_declaring(
@@ -656,6 +708,10 @@ mod tests {
     /// a legacy-URI message explicitly naming SHA-256 is valid and must
     /// decrypt — pinning the digest to SHA-1 rejected conformant senders.
     #[cfg(feature = "weak-algos")]
+    #[cfg_attr(
+        feature = "fips",
+        ignore = "unpaired OAEP is rejected under FIPS (AWS-LC supports only paired OAEP); see fips_rejects_unpaired_oaep"
+    )]
     #[test]
     fn rsa_oaep_mgf1p_honours_an_explicit_sha256_digest() {
         let encrypted = encrypt_declaring(
