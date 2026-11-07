@@ -52,6 +52,7 @@ Routing lands across three PRs. As of this RFC:
 | **RSA-OAEP** key-transport decrypt (+ encrypt) | `crypto/keypair.rs` `decrypt_rsa_oaep`, `xmlenc/encrypt.rs` | C2 | routed |
 | **HMAC-SHA-256** NameId transform | `proxy.rs` `PersistentPerSpHmac` | C3 | routed |
 | **AES-256-GCM** proxy context codec | `proxy.rs` `Aes256GcmCodec` | C3 | routed |
+| **AES-256-GCM** login tracker seal/open | `sp.rs` `LoginTrackerPayload` | C4 | routed |
 
 The reference digest (`dsig/reference.rs`) and the certificate fingerprint both
 call `DigestAlgorithm::digest`, so they are FIPS-backed transitively from PR A —
