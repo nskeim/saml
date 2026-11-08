@@ -5,5 +5,7 @@
 pub(crate) mod aead;
 pub mod cert;
 pub(crate) mod entropy;
+#[cfg(feature = "fips")]
+pub(crate) mod fips;
 pub mod keypair;
 pub mod verifier;

@@ -464,6 +464,7 @@ impl KeyPair {
         algorithm: SignatureAlgorithm,
         signed_bytes: &[u8],
     ) -> Result<Vec<u8>, Error> {
+        crate::crypto::fips::ensure();
         let guard = self.aws_signer()?;
         let Some(key) = guard.as_ref() else {
             return Err(Error::InvalidConfiguration {

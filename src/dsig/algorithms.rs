@@ -149,6 +149,7 @@ impl DigestAlgorithm {
     pub fn digest(self, bytes: &[u8]) -> Vec<u8> {
         #[cfg(feature = "fips")]
         {
+            crate::crypto::fips::ensure();
             let alg = match self {
                 Self::Sha256 => &aws_lc_rs::digest::SHA256,
                 Self::Sha384 => &aws_lc_rs::digest::SHA384,

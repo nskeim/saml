@@ -382,6 +382,22 @@ pub use crate::crypto::keypair::KeyPair;
 pub use crate::crypto::keypair::OaepDigest;
 pub use crate::crypto::verifier::{DefaultVerifier, KeyInfo, SignatureVerifier, VerifyMatch};
 
+/// Assert that this build's AWS-LC module is running in FIPS mode.
+///
+/// Call once at process startup in a FIPS deployment. Returns
+/// `Error::InvalidConfiguration` (failing closed) if the statically-linked
+/// AWS-LC module is not in FIPS mode — e.g. a build mistake where `aws-lc-rs`
+/// was linked without its `fips` feature. The module also self-verifies at
+/// load and refuses to operate on failure, so a FIPS build cannot silently
+/// run non-FIPS crypto; this gives an explicit startup assertion to log or
+/// monitor. The same check runs lazily as a backstop on the first FIPS crypto
+/// operation (digest, sign, verify), so even a deployment that never calls
+/// this function fails closed on first use.
+#[cfg(feature = "fips")]
+pub fn assert_fips_mode() -> Result<(), Error> {
+    crate::crypto::fips::check().map_err(|reason| Error::InvalidConfiguration { reason })
+}
+
 pub use crate::descriptor::{IdpDescriptor, SpDescriptor};
 
 #[cfg(feature = "idp-disco")]
