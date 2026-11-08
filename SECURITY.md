@@ -102,13 +102,20 @@ What a `fips` build changes:
 
 - **Routing.** Digests, the certificate SHA-256 fingerprint, all randomness,
   RSA/ECDSA **signing and verification**, the `xmlenc` AES-GCM/CBC and
-  RSA-OAEP key-transport paths, and the proxy HMAC-SHA-256 / AES-256-GCM
-  context codec all run on AWS-LC (PRs A + B + C2 + C3).
+  RSA-OAEP key-transport paths, the proxy HMAC-SHA-256 / AES-256-GCM context
+  codec, and the SP login-tracker and IdP artifact-resolve-transaction
+  AES-256-GCM seals all run on AWS-LC (PRs A + B + C2 + C3 + C4 + C5).
 - **Policy.** Unpaired RSA-OAEP (label hash ≠ MGF1 hash) is rejected at
   validation time, and sub-2048-bit RSA keys are rejected by the module at
   verify time. `weak-algos` is ignored for the default policy under `fips` —
   `PeerCryptoPolicy::strong_defaults()` never lists SHA-1 or PKCS1-v1.5, so the
   default posture is FIPS-compliant even if `weak-algos` is compiled in.
+- **Runtime assertion.** `assert_fips_mode()` checks at startup that the
+  linked AWS-LC module is actually in FIPS mode and fails closed otherwise,
+  catching a build mistake (e.g. `aws-lc-rs` linked without its `fips`
+  feature). The same check also runs as a fail-closed backstop on the first
+  FIPS crypto operation, so a deployment that never calls it still refuses to
+  run non-FIPS crypto.
 
 **Effect on the `rsa` advisory.** Routing signing and verification to AWS-LC
 removes the pure-Rust `rsa` crate from those two paths in a FIPS build, closing
