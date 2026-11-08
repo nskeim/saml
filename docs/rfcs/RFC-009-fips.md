@@ -123,6 +123,17 @@ FIPS build is the legacy RSA-PKCS#1-v1.5 key-transport path, which `weak-algos`
 gates and the default policy refuses; see `SECURITY.md` → "Known Advisories"
 for the full advisory text.
 
+### Runtime FIPS-mode assertion
+
+A FIPS build must actually *run* the validated module, not just link it.
+`assert_fips_mode()` (public) checks at startup that the linked AWS-LC module
+is in FIPS mode and fails closed otherwise, catching a build mistake (e.g.
+`aws-lc-rs` linked without its `fips` feature). The same check runs as a
+fail-closed backstop on the first FIPS crypto operation — digest, sign, or
+verify — so a deployment that never calls the startup check still refuses to run
+non-FIPS crypto. See `SECURITY.md` → "FIPS Mode" for the operator-facing
+description.
+
 ## 6. Build requirements
 
 A `fips` build compiles AWS-LC from source (the bundled `.cmake`/`.go`), so the

@@ -313,6 +313,16 @@ pub enum Error {
         expected: Binding,
         received: Binding,
     },
+    /// A Redirect-bound SSO Response was presented, but this SP's metadata does
+    /// not advertise a Redirect ACS endpoint. The Web Browser SSO Profile
+    /// §4.1.3 step 5 says the HTTP Redirect binding MUST NOT be used for
+    /// `<Response>`; this crate accepts it only as an explicit,
+    /// metadata-declared deviation, so the absence of a Redirect ACS is a
+    /// fail-closed rejection.
+    #[error(
+        "HTTP Redirect-bound Response rejected: SP metadata does not advertise a Redirect ACS endpoint"
+    )]
+    RedirectResponseNotAdvertised,
 
     // --- Configuration ---
     #[error("Invalid configuration: {reason}")]

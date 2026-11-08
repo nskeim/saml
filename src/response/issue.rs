@@ -711,6 +711,10 @@ fn dispatch_binding(
             })?;
             issue_artifact(acs_endpoint, ars, xml, relay_state, idp_entity_id)
         }
+        // Inbound-only: Profile section 4.1.3 step 5 says Redirect MUST NOT carry a Response; we accept it inbound (metadata-gated) but never issue it.
+        SsoResponseBinding::HttpRedirect => Err(Error::UnsupportedByPeer {
+            binding: crate::binding::Binding::HttpRedirect,
+        }),
     }
 }
 

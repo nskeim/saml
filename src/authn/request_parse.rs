@@ -287,7 +287,12 @@ mod tests {
     }
 
     #[test]
-    fn protocol_binding_redirect_rejected_as_illegal() {
+    fn protocol_binding_redirect_accepted_as_legal() {
+        // HTTP-Redirect is a legal SSO response binding (Bindings §3.4); the
+        // Web Browser SSO Profile §4.1.3 step 5 restriction is a documented,
+        // gated exception (see `ServiceProvider::consume_response`). Parsing
+        // accepts it; this IdP simply does not *issue* Redirect responses, so
+        // the dispatch rejects it with `UnsupportedByPeer` (tested in issue.rs).
         let xml = r#"<samlp:AuthnRequest
             xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
             xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"
@@ -297,13 +302,8 @@ mod tests {
             ProtocolBinding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect">
           <saml:Issuer>https://sp.example.com/saml</saml:Issuer>
         </samlp:AuthnRequest>"#;
-        let err = parse(xml).unwrap_err();
-        match err {
-            Error::IllegalResponseBinding { requested } => {
-                assert_eq!(requested, Binding::HttpRedirect);
-            }
-            other => panic!("expected IllegalResponseBinding, got {other:?}"),
-        }
+        let p = parse(xml).unwrap();
+        assert_eq!(p.protocol_binding, Some(SsoResponseBinding::HttpRedirect));
     }
 
     #[test]
