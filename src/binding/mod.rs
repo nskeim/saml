@@ -89,12 +89,19 @@ impl Binding {
     }
 }
 
-/// Bindings legal for an SSO `<samlp:Response>` per SAML 2.0 Profiles §4.1.4
-/// (Web Browser SSO). Type-level subset of `Binding` that cannot represent
-/// Redirect or SOAP.
+/// Bindings legal for an SSO `<samlp:Response>`. Type-level subset of
+/// `Binding` that cannot represent SOAP.
+///
+/// SAML 2.0 Bindings §3.4 fully defines the HTTP-Redirect binding for
+/// Responses, including the detached query-string signature (§3.4.4.1); the
+/// Web Browser SSO Profile (§4.1.4) neither enumerates nor prohibits it for
+/// Responses. We accept Redirect-bound Responses inbound (mandatory detached
+/// signature — see `sp::ConsumeResponse`) but never issue them outbound (see
+/// `SsoResponseDispatch`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SsoResponseBinding {
     HttpPost,
+    HttpRedirect,
     HttpArtifact,
 }
 
@@ -103,16 +110,18 @@ impl SsoResponseBinding {
     pub const fn as_binding(self) -> Binding {
         match self {
             SsoResponseBinding::HttpPost => Binding::HttpPost,
+            SsoResponseBinding::HttpRedirect => Binding::HttpRedirect,
             SsoResponseBinding::HttpArtifact => Binding::HttpArtifact,
         }
     }
 
-    /// Fallible narrowing. Returns `None` for `HttpRedirect` / `Soap`.
+    /// Fallible narrowing. Returns `None` for `Soap`.
     pub const fn from_binding(b: Binding) -> Option<Self> {
         match b {
             Binding::HttpPost => Some(SsoResponseBinding::HttpPost),
+            Binding::HttpRedirect => Some(SsoResponseBinding::HttpRedirect),
             Binding::HttpArtifact => Some(SsoResponseBinding::HttpArtifact),
-            Binding::HttpRedirect | Binding::Soap => None,
+            Binding::Soap => None,
         }
     }
 
@@ -124,8 +133,8 @@ impl SsoResponseBinding {
     /// Parse a SAML 2.0 binding URI into an `SsoResponseBinding`.
     ///
     /// Returns `Error::IllegalResponseBinding { requested }` if the URI parses
-    /// to a `Binding` that is not legal for an SSO Response (Redirect / SOAP),
-    /// and `Error::InvalidConfiguration` for unknown URIs.
+    /// to a `Binding` that is not legal for an SSO Response (SOAP), and
+    /// `Error::InvalidConfiguration` for unknown URIs.
     pub fn from_uri(uri: &str) -> Result<Self, Error> {
         let binding = Binding::from_uri(uri)?;
         Self::from_binding(binding).ok_or(Error::IllegalResponseBinding { requested: binding })
@@ -190,8 +199,8 @@ impl Endpoint {
 }
 
 /// Type-narrowed endpoint for AssertionConsumerService. The binding is an
-/// `SsoResponseBinding`, so by construction it CANNOT be `HttpRedirect` or
-/// `Soap`. See RFC-003 §2 for rationale.
+/// `SsoResponseBinding`, so by construction it cannot be `Soap`. See RFC-003
+/// §2 for rationale.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SsoResponseEndpoint {
     pub url: String,
@@ -201,6 +210,17 @@ pub struct SsoResponseEndpoint {
 }
 
 impl SsoResponseEndpoint {
+    /// Build a Redirect-binding ACS endpoint. Inbound SSO Responses over this
+    /// binding require a detached query-string signature (Bindings §3.4.4.1).
+    pub fn redirect(url: impl Into<String>, index: u16, is_default: bool) -> Self {
+        Self {
+            url: url.into(),
+            binding: SsoResponseBinding::HttpRedirect,
+            index: Some(index),
+            is_default,
+        }
+    }
+
     /// Build a POST-binding ACS endpoint.
     pub fn post(url: impl Into<String>, index: u16, is_default: bool) -> Self {
         Self {
@@ -236,7 +256,7 @@ impl SsoResponseEndpoint {
     pub fn try_from_endpoint(e: Endpoint) -> Result<Self, Error> {
         let binding =
             SsoResponseBinding::from_binding(e.binding).ok_or(Error::InvalidConfiguration {
-                reason: "ACS endpoint binding must be POST or Artifact",
+                reason: "ACS endpoint binding must be POST, Redirect, or Artifact",
             })?;
         Ok(Self {
             url: e.url,
@@ -274,9 +294,10 @@ pub struct PostForm {
     pub relay_state: Option<String>,
 }
 
-/// Dispatch for outbound SSO `<samlp:Response>`. POST or Artifact only.
-/// `Redirect` is not representable here — Web Browser SSO Responses over
-/// Redirect are not legal per SAML 2.0 Profiles §4.1.4.
+/// Dispatch for outbound SSO `<samlp:Response>`. POST or Artifact only. We
+/// do not issue Responses over Redirect (the Web Browser SSO Profile does not
+/// define it for outbound use); inbound Redirect Responses are accepted with
+/// a mandatory detached query-string signature.
 #[derive(Debug, Clone)]
 pub enum SsoResponseDispatch {
     Post(SsoResponsePostForm),
@@ -504,6 +525,10 @@ mod tests {
     fn sso_response_binding_widen_narrow() {
         assert_eq!(SsoResponseBinding::HttpPost.as_binding(), Binding::HttpPost);
         assert_eq!(
+            SsoResponseBinding::HttpRedirect.as_binding(),
+            Binding::HttpRedirect
+        );
+        assert_eq!(
             SsoResponseBinding::HttpArtifact.as_binding(),
             Binding::HttpArtifact
         );
@@ -512,21 +537,25 @@ mod tests {
             Some(SsoResponseBinding::HttpPost)
         );
         assert_eq!(
-            SsoResponseBinding::from_binding(Binding::HttpArtifact),
-            Some(SsoResponseBinding::HttpArtifact)
+            SsoResponseBinding::from_binding(Binding::HttpRedirect),
+            Some(SsoResponseBinding::HttpRedirect)
         );
         assert_eq!(
-            SsoResponseBinding::from_binding(Binding::HttpRedirect),
-            None
+            SsoResponseBinding::from_binding(Binding::HttpArtifact),
+            Some(SsoResponseBinding::HttpArtifact)
         );
         assert_eq!(SsoResponseBinding::from_binding(Binding::Soap), None);
     }
 
     #[test]
-    fn sso_response_binding_from_uri_accepts_post_and_artifact() {
+    fn sso_response_binding_from_uri_accepts_post_redirect_and_artifact() {
         assert_eq!(
             SsoResponseBinding::from_uri(Binding::HttpPost.uri()).unwrap(),
             SsoResponseBinding::HttpPost
+        );
+        assert_eq!(
+            SsoResponseBinding::from_uri(Binding::HttpRedirect.uri()).unwrap(),
+            SsoResponseBinding::HttpRedirect
         );
         assert_eq!(
             SsoResponseBinding::from_uri(Binding::HttpArtifact.uri()).unwrap(),
@@ -535,15 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn sso_response_binding_from_uri_rejects_redirect_and_soap() {
-        let err = SsoResponseBinding::from_uri(Binding::HttpRedirect.uri()).unwrap_err();
-        match err {
-            Error::IllegalResponseBinding { requested } => {
-                assert_eq!(requested, Binding::HttpRedirect);
-            }
-            other => panic!("expected IllegalResponseBinding, got {other:?}"),
-        }
-
+    fn sso_response_binding_from_uri_rejects_soap() {
         let err = SsoResponseBinding::from_uri(Binding::Soap.uri()).unwrap_err();
         match err {
             Error::IllegalResponseBinding { requested } => {
@@ -607,6 +628,10 @@ mod tests {
         let a = SsoResponseEndpoint::artifact("https://example.com/acs-art", 1, false);
         assert_eq!(a.binding, SsoResponseBinding::HttpArtifact);
         assert_eq!(a.as_endpoint().binding, Binding::HttpArtifact);
+
+        let r = SsoResponseEndpoint::redirect("https://example.com/acs-redir", 2, false);
+        assert_eq!(r.binding, SsoResponseBinding::HttpRedirect);
+        assert_eq!(r.as_endpoint().binding, Binding::HttpRedirect);
     }
 
     #[test]
@@ -623,18 +648,12 @@ mod tests {
         assert_eq!(narrowed.binding, SsoResponseBinding::HttpArtifact);
         assert_eq!(narrowed.index, Some(2));
         assert!(!narrowed.is_default);
-    }
 
-    #[test]
-    fn sso_response_endpoint_try_from_redirect_rejected() {
-        let redirect = Endpoint::redirect("https://example.com/r", 0, true);
-        let err = SsoResponseEndpoint::try_from_endpoint(redirect).unwrap_err();
-        match err {
-            Error::InvalidConfiguration { reason } => {
-                assert_eq!(reason, "ACS endpoint binding must be POST or Artifact");
-            }
-            other => panic!("expected InvalidConfiguration, got {other:?}"),
-        }
+        let redir = Endpoint::redirect("https://example.com/acs-redir", 3, false);
+        let narrowed = SsoResponseEndpoint::try_from_endpoint(redir).unwrap();
+        assert_eq!(narrowed.binding, SsoResponseBinding::HttpRedirect);
+        assert_eq!(narrowed.url, "https://example.com/acs-redir");
+        assert_eq!(narrowed.index, Some(3));
     }
 
     #[test]
@@ -643,7 +662,10 @@ mod tests {
         let err = SsoResponseEndpoint::try_from_endpoint(soap).unwrap_err();
         match err {
             Error::InvalidConfiguration { reason } => {
-                assert_eq!(reason, "ACS endpoint binding must be POST or Artifact");
+                assert_eq!(
+                    reason,
+                    "ACS endpoint binding must be POST, Redirect, or Artifact"
+                );
             }
             other => panic!("expected InvalidConfiguration, got {other:?}"),
         }

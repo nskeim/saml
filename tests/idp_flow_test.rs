@@ -167,6 +167,7 @@ fn idp_consumes_redirect_authn_request_and_emits_response() {
             peer_crypto_policy: None,
             saml_response: &response_xml,
             binding: SsoResponseBinding::HttpPost,
+            detached_signature: None,
             relay_state: Some("idp-flow-relay"),
             tracker: Some(&start.tracker),
             expected_destination: SP_ACS_URL,

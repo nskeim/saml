@@ -636,6 +636,13 @@ pub struct ConsumeUpstreamResponse<'a> {
     /// Raw `<samlp:Response>` XML, already base64-decoded by the binding layer.
     pub saml_response: &'a [u8],
     pub binding: crate::binding::SsoResponseBinding,
+    /// Redirect binding only: the detached query-string signature material
+    /// (Bindings §3.4.4.1), as extracted by the binding layer via
+    /// [`crate::DecodedWire::as_detached_signature`]. Mandatory when
+    /// `binding` is [`crate::binding::SsoResponseBinding::HttpRedirect`],
+    /// ignored for POST / Artifact — see
+    /// [`ConsumeResponse::detached_signature`](crate::ConsumeResponse).
+    pub detached_signature: Option<crate::idp::DetachedSignature<'a>>,
     /// The proxy's own ACS URL that received this Response.
     pub expected_destination: &'a str,
     pub now: SystemTime,
@@ -900,6 +907,7 @@ impl Proxy<'_> {
                 peer_crypto_policy: input.peer_crypto_policy,
                 saml_response: input.saml_response,
                 binding: input.binding,
+                detached_signature: input.detached_signature,
                 relay_state: Some(input.relay_state),
                 // From the context, never from the caller — this is the coupling.
                 tracker: Some(&LoginTracker::from_payload(
@@ -2355,6 +2363,7 @@ mod tests {
                 peer_crypto_policy: None,
                 saml_response: &response,
                 binding: crate::binding::SsoResponseBinding::HttpPost,
+                detached_signature: None,
                 expected_destination: "https://proxy.example.com/acs",
                 now,
                 clock_skew: Duration::from_mins(1),

@@ -93,19 +93,21 @@ impl SpDescriptor {
 
         let (signing_certs, encryption_certs) = parse_key_descriptors(sp)?;
 
-        // RFC-006 §2.1: narrow each ACS endpoint to SsoResponseEndpoint. A
-        // Redirect or SOAP ACS is silently allowed by the underlying schema
-        // but is non-conformant per SAML 2.0 Profiles §4.1.4. Surface it as a
-        // structured parse error so the caller cannot accept SP metadata
-        // that would later let the IdP mint a Response over an illegal
-        // binding.
+        // RFC-006 §2.1: narrow each ACS endpoint to SsoResponseEndpoint.
+        // POST, Redirect, and Artifact are legal SSO response bindings; only
+        // SOAP is rejected. A Redirect ACS is the metadata opt-in that lets
+        // this SP accept Redirect-bound Responses (Web Browser SSO Profile
+        // §4.1.3 step 5 otherwise prohibits Redirect for `<Response>`); see
+        // `ServiceProvider::consume_response`. Surface a SOAP ACS as a
+        // structured parse error so the caller cannot accept SP metadata that
+        // would later let the IdP mint a Response over an illegal binding.
         let mut assertion_consumer_services = Vec::new();
         for child in sp.all_child_elements(Some(MD_NS), "AssertionConsumerService") {
             let endpoint = parse_endpoint(child)?;
             let narrowed =
                 SsoResponseEndpoint::try_from_endpoint(endpoint).map_err(|e| match e {
                     Error::InvalidConfiguration { .. } => Error::InvalidConfiguration {
-                        reason: "SP metadata advertises ACS with non-POST/Artifact binding",
+                        reason: "SP metadata advertises ACS with a binding other than POST, Redirect, or Artifact",
                     },
                     other => other,
                 })?;
@@ -356,7 +358,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_acs_with_redirect_binding() {
+    fn accepts_acs_with_redirect_binding() {
+        // A Redirect ACS is the metadata opt-in that lets this SP accept
+        // Redirect-bound Responses (Web Browser SSO Profile §4.1.3 step 5
+        // otherwise prohibits Redirect for `<Response>`).
         let xml = r#"<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata"
                                      entityID="https://sp.example.com/saml">
               <md:SPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
@@ -366,16 +371,11 @@ mod tests {
                     Location="https://sp.example.com/acs"/>
               </md:SPSSODescriptor>
             </md:EntityDescriptor>"#;
-        let err = SpDescriptor::from_metadata_xml(xml.as_bytes()).unwrap_err();
-        match err {
-            Error::InvalidConfiguration { reason } => {
-                assert_eq!(
-                    reason,
-                    "SP metadata advertises ACS with non-POST/Artifact binding"
-                );
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        let sp = SpDescriptor::from_metadata_xml(xml.as_bytes()).unwrap();
+        assert_eq!(
+            sp.acs_endpoint_by_index(0).unwrap().binding,
+            crate::binding::SsoResponseBinding::HttpRedirect
+        );
     }
 
     #[test]
@@ -394,7 +394,7 @@ mod tests {
             Error::InvalidConfiguration { reason } => {
                 assert_eq!(
                     reason,
-                    "SP metadata advertises ACS with non-POST/Artifact binding"
+                    "SP metadata advertises ACS with a binding other than POST, Redirect, or Artifact"
                 );
             }
             other => panic!("unexpected error: {other:?}"),

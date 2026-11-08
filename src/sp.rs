@@ -747,6 +747,18 @@ pub struct ConsumeResponse<'a> {
     /// Raw XML bytes (already base64-decoded by the binding layer).
     pub saml_response: &'a [u8],
     pub binding: SsoResponseBinding,
+    /// Redirect binding only: the detached query-string signature material
+    /// (Bindings §3.4.4.1), as extracted by the binding layer via
+    /// [`crate::DecodedWire::as_detached_signature`]. Redirect-bound Responses
+    /// deviate from the Web Browser SSO Profile §4.1.3 step 5 (Redirect MUST
+    /// NOT be used for `<Response>`), so they are accepted only when this SP's
+    /// metadata advertises a Redirect ACS endpoint — otherwise the Response is
+    /// rejected with [`Error::RedirectResponseNotAdvertised`]. When accepted,
+    /// this detached signature is mandatory: it is the only integrity
+    /// mechanism for that binding, so an unsigned Redirect Response fails
+    /// closed regardless of `want_signed` (which governs the POST/Artifact
+    /// envelope signature). Ignored for POST / Artifact.
+    pub detached_signature: Option<crate::idp::DetachedSignature<'a>>,
     pub relay_state: Option<&'a str>,
     pub tracker: Option<&'a LoginTracker>,
     /// SP ACS URL that received this Response.
@@ -993,6 +1005,43 @@ impl ServiceProvider {
         });
         let validation_idp = pinned_idp.as_ref().unwrap_or(input.idp);
 
+        // Redirect-bound Responses deviate from the Web Browser SSO Profile
+        // §4.1.3 step 5 (Redirect MUST NOT be used for <Response>); they are
+        // accepted here only when this SP's metadata advertises a Redirect ACS.
+        // When accepted, the detached signature over the canonical query string
+        // (Bindings §3.4.4.1) is the binding's only integrity mechanism, so it
+        // is mandatory regardless of `want_signed` (which governs the
+        // POST/Artifact envelope signature). Verify first, then bind the signed
+        // query to the XML we parsed: without the binding check, a genuine
+        // signed query could be presented alongside different, unsigned XML.
+        if input.binding == SsoResponseBinding::HttpRedirect {
+            let advertises_redirect = self
+                .config
+                .acs
+                .iter()
+                .any(|e| e.binding == SsoResponseBinding::HttpRedirect);
+            if !advertises_redirect {
+                return Err(Error::RedirectResponseNotAdvertised);
+            }
+            let Some(detached) = input.detached_signature else {
+                return Err(Error::SignatureMissing);
+            };
+            let sig_alg = SignatureAlgorithm::from_uri(detached.sig_alg)?;
+            verify_detached_signature_with(
+                detached.raw_query_string.as_bytes(),
+                detached.signature,
+                sig_alg,
+                &validation_idp.signing_certs,
+                &policy.allowed_signature_algorithms,
+                verifier,
+            )?;
+            ensure_signed_query_matches_response(
+                detached.raw_query_string,
+                input.saml_response,
+                input.relay_state,
+            )?;
+        }
+
         let identity = validate_response(ValidateResponse {
             document: &document,
             parsed,
@@ -1187,6 +1236,7 @@ impl ServiceProvider {
             peer_crypto_policy: input.peer_crypto_policy,
             saml_response: &inner_xml,
             binding: SsoResponseBinding::HttpArtifact,
+            detached_signature: None,
             relay_state: input.relay_state,
             tracker: input.tracker,
             expected_destination: input.expected_destination,
@@ -1202,6 +1252,36 @@ impl ServiceProvider {
 /// The instant a replay tombstone may be dropped: the last moment the
 /// assertion could still pass validation.
 ///
+/// Bind the signed Redirect query string to the XML this call validates.
+/// Decoding the signed query (Bindings §3.4.4.1) must yield exactly the
+/// `SAMLResponse` bytes and `RelayState` we parsed; otherwise a genuine
+/// signed query could be paired with different, unsigned XML — the
+/// signature would verify against the query while we validate the other
+/// document. Mirrors `ensure_signed_query_matches` on the IdP side
+/// (Request direction).
+fn ensure_signed_query_matches_response(
+    raw_query_string: &str,
+    saml_response: &[u8],
+    relay_state: Option<&str>,
+) -> Result<(), Error> {
+    let decoded = crate::binding::decode_wire(
+        raw_query_string.as_bytes(),
+        Binding::HttpRedirect,
+        crate::binding::WireDirection::Response,
+    )?;
+    if decoded.xml != saml_response {
+        return Err(Error::SignatureVerification {
+            reason: "saml_response is not the XML covered by the detached Redirect signature",
+        });
+    }
+    if decoded.relay_state.as_deref() != relay_state {
+        return Err(Error::SignatureVerification {
+            reason: "relay_state is not the value covered by the detached Redirect signature",
+        });
+    }
+    Ok(())
+}
+
 /// Validation accepts an assertion until `NotOnOrAfter + clock_skew`, so a
 /// tombstone expiring at the raw `NotOnOrAfter` would reopen a replay interval
 /// `clock_skew` wide during which the assertion still validates but the cache
@@ -2772,6 +2852,223 @@ mod tests {
             .expect("static UNIX_EPOCH + bounded Duration cannot overflow")
     }
 
+    /// Encode a signed SSO Response as an HTTP-Redirect raw query string — the
+    /// material the SP's binding layer would hand to `ConsumeResponse`.
+    /// Returns `(xml, signed_query_string, signature_bytes, sig_alg)`.
+    fn build_signed_redirect_response(
+        kp: &KeyPair,
+        in_response_to: Option<&str>,
+        relay_state: Option<&str>,
+    ) -> (Vec<u8>, String, Vec<u8>, String) {
+        use crate::binding::Dispatch;
+        use crate::binding::redirect::{RedirectDirection, encode_signed};
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD as BASE64;
+
+        let xml = build_signed_response_xml(
+            kp,
+            in_response_to,
+            "https://sp.example.com/acs",
+            "https://sp.example.com",
+            "2026-05-26T11:59:00Z",
+            "2026-05-26T12:10:00Z",
+        );
+        let sig_alg = SignatureAlgorithm::RsaSha256;
+        let dest = url::Url::parse("https://sp.example.com/acs").unwrap();
+        let dispatch = encode_signed(
+            &dest,
+            RedirectDirection::Response,
+            &xml,
+            relay_state,
+            sig_alg.uri(),
+            |to_sign| crate::dsig::sign::sign_detached_query(to_sign, kp, sig_alg),
+        )
+        .unwrap();
+        let url = match dispatch {
+            Dispatch::Redirect(u) => u,
+            other @ Dispatch::Post(_) => panic!("expected Redirect dispatch, got {other:?}"),
+        };
+        let raw_query = url.query().unwrap().to_owned();
+        let decoded =
+            crate::binding::redirect::decode(&raw_query, RedirectDirection::Response).unwrap();
+        let signed_qs = decoded
+            .signed_query_string
+            .expect("signed redirect carries the canonical signed query string");
+
+        // Re-extract Signature / SigAlg from the raw query (percent-encoded
+        // values), then decode to raw signature bytes / URI string.
+        let mut signature_raw = String::new();
+        let mut sig_alg_raw = String::new();
+        for pair in raw_query.split('&') {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            match k {
+                "Signature" => signature_raw = v.to_owned(),
+                "SigAlg" => sig_alg_raw = v.to_owned(),
+                _ => {}
+            }
+        }
+        let signature_b64 = percent_encoding::percent_decode_str(&signature_raw)
+            .decode_utf8()
+            .unwrap()
+            .into_owned();
+        let signature_bytes = BASE64.decode(signature_b64.as_bytes()).unwrap();
+        let sig_alg_decoded = percent_encoding::percent_decode_str(&sig_alg_raw)
+            .decode_utf8()
+            .unwrap()
+            .into_owned();
+
+        (decoded.xml, signed_qs, signature_bytes, sig_alg_decoded)
+    }
+
+    /// A SP config that also advertises a Redirect ACS — the metadata opt-in
+    /// required to accept Redirect-bound Responses.
+    fn sp_config_with_redirect_acs(allow_unsolicited: bool) -> ServiceProviderConfig {
+        let mut cfg = fixture_sp_config(None, allow_unsolicited, false);
+        cfg.acs.push(SsoResponseEndpoint::redirect(
+            "https://sp.example.com/acs",
+            1,
+            false,
+        ));
+        cfg
+    }
+
+    #[test]
+    fn consume_response_redirect_advertised_valid_signature_accepted() {
+        let kp = rsa_signing_key();
+        let sp = ServiceProvider::new(sp_config_with_redirect_acs(true)).unwrap();
+        let idp = fixture_idp();
+        let (xml, signed_qs, signature, sig_alg) = build_signed_redirect_response(&kp, None, None);
+
+        let identity = sp
+            .consume_response(ConsumeResponse {
+                idp: &idp,
+                peer_crypto_policy: None,
+                saml_response: &xml,
+                binding: SsoResponseBinding::HttpRedirect,
+                detached_signature: Some(crate::idp::DetachedSignature {
+                    signature: &signature,
+                    sig_alg: &sig_alg,
+                    raw_query_string: &signed_qs,
+                }),
+                relay_state: None,
+                tracker: None,
+                expected_destination: "https://sp.example.com/acs",
+                now: fixed_now(),
+                clock_skew: Duration::from_secs(30),
+                replay_cache: None,
+                replay_mode: ReplayMode::All,
+                holder_of_key_cert: None,
+            })
+            .expect("metadata-advertised, signed Redirect Response must be accepted");
+
+        assert_eq!(identity.assertion_id, "_a1");
+        assert_eq!(identity.name_id.value, "alice@example.com");
+    }
+
+    #[test]
+    fn consume_response_redirect_not_advertised_rejected() {
+        // The SP's metadata advertises no Redirect ACS, so the profile
+        // deviation is not opted into — fail closed before any signature work.
+        let kp = rsa_signing_key();
+        let sp = ServiceProvider::new(fixture_sp_config(None, true, false)).unwrap();
+        let idp = fixture_idp();
+        let (xml, signed_qs, signature, sig_alg) = build_signed_redirect_response(&kp, None, None);
+
+        let err = sp
+            .consume_response(ConsumeResponse {
+                idp: &idp,
+                peer_crypto_policy: None,
+                saml_response: &xml,
+                binding: SsoResponseBinding::HttpRedirect,
+                detached_signature: Some(crate::idp::DetachedSignature {
+                    signature: &signature,
+                    sig_alg: &sig_alg,
+                    raw_query_string: &signed_qs,
+                }),
+                relay_state: None,
+                tracker: None,
+                expected_destination: "https://sp.example.com/acs",
+                now: fixed_now(),
+                clock_skew: Duration::from_secs(30),
+                replay_cache: None,
+                replay_mode: ReplayMode::All,
+                holder_of_key_cert: None,
+            })
+            .unwrap_err();
+        assert!(matches!(err, Error::RedirectResponseNotAdvertised));
+    }
+
+    #[test]
+    fn consume_response_redirect_missing_detached_signature_rejected() {
+        // Advertised, but the caller omits the detached signature: the binding's
+        // only integrity mechanism is absent, so fail closed regardless of
+        // `want_signed`.
+        let kp = rsa_signing_key();
+        let sp = ServiceProvider::new(sp_config_with_redirect_acs(true)).unwrap();
+        let idp = fixture_idp();
+        let (xml, _signed_qs, _signature, _sig_alg) =
+            build_signed_redirect_response(&kp, None, None);
+
+        let err = sp
+            .consume_response(ConsumeResponse {
+                idp: &idp,
+                peer_crypto_policy: None,
+                saml_response: &xml,
+                binding: SsoResponseBinding::HttpRedirect,
+                detached_signature: None,
+                relay_state: None,
+                tracker: None,
+                expected_destination: "https://sp.example.com/acs",
+                now: fixed_now(),
+                clock_skew: Duration::from_secs(30),
+                replay_cache: None,
+                replay_mode: ReplayMode::All,
+                holder_of_key_cert: None,
+            })
+            .unwrap_err();
+        assert!(matches!(err, Error::SignatureMissing));
+    }
+
+    #[test]
+    fn consume_response_redirect_tampered_xml_rejected() {
+        // A genuine signed query presented alongside different, unsigned XML:
+        // the signed-query-to-XML binding check must reject it.
+        let kp = rsa_signing_key();
+        let sp = ServiceProvider::new(sp_config_with_redirect_acs(true)).unwrap();
+        let idp = fixture_idp();
+        let (xml, signed_qs, signature, sig_alg) = build_signed_redirect_response(&kp, None, None);
+        // Tamper while keeping the XML well-formed: change the assertion ID so
+        // `Document::parse` succeeds and the flow reaches the signed-query-to-XML
+        // binding check, which must reject XML that differs from what was signed.
+        let tampered = std::str::from_utf8(&xml)
+            .expect("response XML is UTF-8")
+            .replace("_a1", "_a2")
+            .into_bytes();
+
+        let err = sp
+            .consume_response(ConsumeResponse {
+                idp: &idp,
+                peer_crypto_policy: None,
+                saml_response: &tampered,
+                binding: SsoResponseBinding::HttpRedirect,
+                detached_signature: Some(crate::idp::DetachedSignature {
+                    signature: &signature,
+                    sig_alg: &sig_alg,
+                    raw_query_string: &signed_qs,
+                }),
+                relay_state: None,
+                tracker: None,
+                expected_destination: "https://sp.example.com/acs",
+                now: fixed_now(),
+                clock_skew: Duration::from_secs(30),
+                replay_cache: None,
+                replay_mode: ReplayMode::All,
+                holder_of_key_cert: None,
+            })
+            .unwrap_err();
+        assert!(matches!(err, Error::SignatureVerification { .. }));
+    }
+
     #[test]
     fn consume_response_solicited_returns_identity() {
         let kp = rsa_signing_key();
@@ -2806,6 +3103,7 @@ mod tests {
                 peer_crypto_policy: None,
                 saml_response: &xml,
                 binding: SsoResponseBinding::HttpPost,
+                detached_signature: None,
                 relay_state: None,
                 tracker: Some(&tracker),
                 expected_destination: "https://sp.example.com/acs",
@@ -2907,6 +3205,7 @@ mod tests {
                 peer_crypto_policy: None,
                 saml_response: &xml,
                 binding: SsoResponseBinding::HttpPost,
+                detached_signature: None,
                 relay_state: None,
                 tracker: Some(&tracker),
                 expected_destination: "https://sp.example.com/acs",
@@ -2959,6 +3258,7 @@ mod tests {
                 peer_crypto_policy: None,
                 saml_response: &xml,
                 binding: SsoResponseBinding::HttpPost,
+                detached_signature: None,
                 relay_state: None,
                 tracker: Some(&tracker),
                 expected_destination: "https://sp.example.com/acs",
@@ -3008,6 +3308,7 @@ mod tests {
                 peer_crypto_policy: None,
                 saml_response: &xml,
                 binding: SsoResponseBinding::HttpPost,
+                detached_signature: None,
                 relay_state: None,
                 tracker: Some(&tracker),
                 expected_destination: "https://sp.example.com/acs",
@@ -3062,6 +3363,7 @@ mod tests {
                 peer_crypto_policy: None,
                 saml_response: &xml,
                 binding: SsoResponseBinding::HttpPost,
+                detached_signature: None,
                 relay_state: None,
                 tracker: Some(&tracker),
                 expected_destination: "https://sp.example.com/acs",
@@ -3121,6 +3423,7 @@ mod tests {
                 peer_crypto_policy: None,
                 saml_response: &xml,
                 binding: SsoResponseBinding::HttpPost,
+                detached_signature: None,
                 relay_state: None,
                 tracker: Some(&tracker),
                 expected_destination: "https://sp.example.com/acs",
@@ -3177,6 +3480,7 @@ mod tests {
             peer_crypto_policy: None,
             saml_response: &xml,
             binding: SsoResponseBinding::HttpPost,
+            detached_signature: None,
             relay_state: None,
             tracker: Some(&tracker),
             expected_destination: "https://sp.example.com/acs",
@@ -3258,6 +3562,7 @@ mod tests {
                 peer_crypto_policy: None,
                 saml_response: &double_signed,
                 binding: SsoResponseBinding::HttpPost,
+                detached_signature: None,
                 relay_state: None,
                 tracker: Some(&tracker),
                 expected_destination: "https://sp.example.com/acs",
@@ -3297,6 +3602,7 @@ mod tests {
                 peer_crypto_policy: None,
                 saml_response: &xml,
                 binding: SsoResponseBinding::HttpPost,
+                detached_signature: None,
                 relay_state: None,
                 tracker: None,
                 expected_destination: "https://sp.example.com/acs",
@@ -3344,6 +3650,7 @@ mod tests {
                 peer_crypto_policy: None,
                 saml_response: &xml,
                 binding: SsoResponseBinding::HttpPost,
+                detached_signature: None,
                 relay_state: None,
                 tracker: Some(&tracker),
                 expected_destination: "https://sp.example.com/acs",
@@ -3389,6 +3696,7 @@ mod tests {
                 peer_crypto_policy: None,
                 saml_response: &xml,
                 binding: SsoResponseBinding::HttpPost,
+                detached_signature: None,
                 relay_state: None,
                 tracker: Some(&tracker),
                 // Not in self.acs:
@@ -3426,6 +3734,7 @@ mod tests {
                 peer_crypto_policy: None,
                 saml_response: b"not parsed because tracker correlation fails first",
                 binding: SsoResponseBinding::HttpPost,
+                detached_signature: None,
                 relay_state: None,
                 tracker: Some(&tracker),
                 expected_destination: "https://sp.example.com/acs",
@@ -3466,6 +3775,7 @@ mod tests {
                 peer_crypto_policy: None,
                 saml_response: b"not parsed because tracker correlation fails first",
                 binding: SsoResponseBinding::HttpArtifact,
+                detached_signature: None,
                 relay_state: None,
                 tracker: Some(&tracker),
                 expected_destination: "https://sp.example.com/acs",
@@ -3558,6 +3868,7 @@ mod tests {
                 peer_crypto_policy: None,
                 saml_response: &xml,
                 binding: SsoResponseBinding::HttpPost,
+                detached_signature: None,
                 relay_state: None,
                 tracker: Some(&tracker),
                 expected_destination: "https://sp.example.com/acs",
@@ -3635,6 +3946,7 @@ mod tests {
                 peer_crypto_policy: None,
                 saml_response: &xml,
                 binding: SsoResponseBinding::HttpPost,
+                detached_signature: None,
                 relay_state: None,
                 tracker: Some(&tracker),
                 expected_destination: "https://sp.example.com/acs",
@@ -3655,6 +3967,7 @@ mod tests {
                 peer_crypto_policy: None,
                 saml_response: &xml,
                 binding: SsoResponseBinding::HttpPost,
+                detached_signature: None,
                 relay_state: None,
                 tracker: Some(&tracker),
                 expected_destination: "https://sp.example.com/acs",
@@ -3714,6 +4027,7 @@ mod tests {
                 peer_crypto_policy: None,
                 saml_response: &xml,
                 binding: SsoResponseBinding::HttpPost,
+                detached_signature: None,
                 relay_state: None,
                 tracker: Some(&tracker),
                 expected_destination: "https://sp.example.com/acs",
@@ -3740,6 +4054,7 @@ mod tests {
                 peer_crypto_policy: None,
                 saml_response: &xml,
                 binding: SsoResponseBinding::HttpPost,
+                detached_signature: None,
                 relay_state: None,
                 tracker: Some(&tracker),
                 expected_destination: "https://sp.example.com/acs",
@@ -3794,6 +4109,7 @@ mod tests {
                 peer_crypto_policy: None,
                 saml_response: &xml,
                 binding: SsoResponseBinding::HttpPost,
+                detached_signature: None,
                 relay_state: None,
                 tracker: Some(&tracker),
                 expected_destination: "https://sp.example.com/acs",
@@ -3817,6 +4133,7 @@ mod tests {
                 peer_crypto_policy: None,
                 saml_response: &xml,
                 binding: SsoResponseBinding::HttpPost,
+                detached_signature: None,
                 relay_state: None,
                 tracker: Some(&tracker),
                 expected_destination: "https://sp.example.com/acs",
@@ -3875,6 +4192,7 @@ mod tests {
                 peer_crypto_policy: None,
                 saml_response: &xml,
                 binding: SsoResponseBinding::HttpPost,
+                detached_signature: None,
                 relay_state: None,
                 tracker: Some(&tracker),
                 expected_destination: "https://sp.example.com/acs",
@@ -3944,6 +4262,7 @@ mod tests {
             peer_crypto_policy: None,
             saml_response: &xml,
             binding: SsoResponseBinding::HttpPost,
+            detached_signature: None,
             relay_state: None,
             tracker: Some(&tracker),
             expected_destination: "https://sp.example.com/acs",
@@ -3960,6 +4279,7 @@ mod tests {
             peer_crypto_policy: None,
             saml_response: &xml,
             binding: SsoResponseBinding::HttpPost,
+            detached_signature: None,
             relay_state: None,
             tracker: Some(&tracker),
             expected_destination: "https://sp.example.com/acs",
@@ -4053,6 +4373,7 @@ mod tests {
                 peer_crypto_policy: None,
                 saml_response: &xml,
                 binding: SsoResponseBinding::HttpPost,
+                detached_signature: None,
                 relay_state: None,
                 tracker: Some(&tracker),
                 expected_destination: "https://sp.example.com/acs",

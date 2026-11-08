@@ -109,7 +109,11 @@ What a `fips` build changes:
   validation time, and sub-2048-bit RSA keys are rejected by the module at
   verify time. `weak-algos` is ignored for the default policy under `fips` —
   `PeerCryptoPolicy::strong_defaults()` never lists SHA-1 or PKCS1-v1.5, so the
-  default posture is FIPS-compliant even if `weak-algos` is compiled in.
+  default posture is FIPS-compliant even if `weak-algos` is compiled in. This
+  is a *default-policy* guarantee, not a compile-time one: a hand-built
+  `PeerCryptoPolicy` that explicitly lists RSA-SHA1 or PKCS1-v1.5 will still
+  route those two operations through the pure-Rust `sha1` / `rsa` crates even
+  under `fips` + `weak-algos`. The default path never does.
 - **Runtime assertion.** `assert_fips_mode()` checks at startup that the
   linked AWS-LC module is actually in FIPS mode and fails closed otherwise,
   catching a build mistake (e.g. `aws-lc-rs` linked without its `fips`
@@ -154,6 +158,53 @@ documented advisory:
 
   The advisory is recorded in `deny.toml` and the `cargo audit` CI step; it will
   be dropped once `rsa` ships a constant-time stable release.
+
+## HTTP-Redirect SSO Response Binding (metadata-gated)
+
+The Web Browser SSO Profile (OASIS, §4.1.3 *Profile Description*, step 5)
+states:
+
+> Either the HTTP POST, or HTTP Artifact binding can be used to transfer the
+> message to the service provider through the user agent. … **The HTTP
+> Redirect binding MUST NOT be used, as the response will typically exceed
+> the URL length permitted by most user agents.**
+
+This crate therefore does **not** accept HTTP-Redirect-bound `<Response>`
+messages by default. Acceptance is a documented, opt-in exception for
+interoperability with IdPs that do send Redirect responses (the SAML 2.0
+Bindings spec, §3.4 and §3.4.4.1, fully defines the binding, including its
+detached query-string signature). The opt-in is expressed through metadata: an
+SP accepts a Redirect-bound response **only if its own metadata advertises an
+ACS endpoint with the HTTP-Redirect binding**. An SP that has not advertised a
+Redirect ACS rejects such a response with `Error::RedirectResponseNotAdvertised`
+(fail closed) — the Profile's default, with no configuration change.
+
+When accepted, the binding is held to three controls:
+
+- **Mandatory detached signature.** A Redirect-bound response must carry a
+  detached query-string signature (Bindings §3.4.4.1). Its absence is a hard
+  error (`Error::SignatureMissing`), independent of the SP's `want_signed`
+  policy — over an unauthenticated GET, the query string is the only integrity
+  anchor available.
+- **Signed-query → XML binding.** The `SAMLResponse` and `RelayState` values
+  in the parsed body must byte-match the values covered by the detached
+  signature (`ensure_signed_query_matches_response`). A response whose body
+  differs from its signed query is rejected (`Error::SignatureVerification`),
+  closing the "signed one thing, sent another" vector.
+- **Existing signature policy still applies.** The detached query signature is
+  *additive*. A Redirect response must still satisfy the SP's `want_signed`
+  policy with an XML-level (envelope) signature on the Response root and/or
+  Assertion, exactly as a POST response would. The two signatures are checked
+  independently and both must pass.
+
+**Audit posture.** This is a deliberate, scoped deviation from the Profile's
+MUST NOT, gated behind explicit metadata (a Redirect ACS) and held to the
+controls above. The Profile's stated rationale is a practical URL-length
+limit, not a security property; the mandatory detached signature plus the
+signed-query→XML binding provide the integrity the Profile assumes is absent.
+This IdP does not *issue* Redirect responses (the outbound dispatch returns
+`Error::UnsupportedByPeer`), so the deviation is inbound-only and never widens
+what this crate sends on the wire.
 
 ## Disclosure Timeline
 
