@@ -218,6 +218,7 @@ fn idp_encrypts_assertion_and_sp_decrypts_it() {
             peer_crypto_policy: None,
             saml_response: &response_xml,
             binding: SsoResponseBinding::HttpPost,
+            detached_signature: None,
             relay_state: Some("enc-flow-relay"),
             tracker: Some(&start.tracker),
             expected_destination: SP_ACS_URL,
