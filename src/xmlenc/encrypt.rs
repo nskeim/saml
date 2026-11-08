@@ -36,7 +36,7 @@ use crate::xmlenc::algorithms::{DataEncryptionAlgorithm, KeyTransportAlgorithm};
 #[cfg(feature = "fips")]
 use aws_lc_rs::aead::{AES_128_GCM, AES_256_GCM, Aad, LessSafeKey, UnboundKey};
 #[cfg(feature = "fips")]
-use aws_lc_rs::cipher::{AES_128, AES_256};
+use aws_lc_rs::cipher::{AES_128, AES_256, Algorithm};
 #[cfg(feature = "fips")]
 use aws_lc_rs::rsa::{
     OAEP_SHA1_MGF1SHA1, OAEP_SHA256_MGF1SHA256, OaepPublicEncryptingKey, PublicEncryptingKey,
@@ -165,11 +165,17 @@ fn encrypt_data(
     #[cfg(feature = "fips")]
     {
         match algorithm {
-            DataEncryptionAlgorithm::Aes128Cbc | DataEncryptionAlgorithm::Aes256Cbc => {
-                encrypt_cbc_fips(session_key, plaintext, algorithm)
+            DataEncryptionAlgorithm::Aes128Cbc => {
+                encrypt_cbc_fips(session_key, plaintext, &AES_128)
             }
-            DataEncryptionAlgorithm::Aes128Gcm | DataEncryptionAlgorithm::Aes256Gcm => {
-                encrypt_gcm_fips(session_key, plaintext, algorithm)
+            DataEncryptionAlgorithm::Aes256Cbc => {
+                encrypt_cbc_fips(session_key, plaintext, &AES_256)
+            }
+            DataEncryptionAlgorithm::Aes128Gcm => {
+                encrypt_gcm_fips(session_key, plaintext, &AES_128_GCM)
+            }
+            DataEncryptionAlgorithm::Aes256Gcm => {
+                encrypt_gcm_fips(session_key, plaintext, &AES_256_GCM)
             }
         }
     }
@@ -259,19 +265,10 @@ where
 fn encrypt_cbc_fips(
     session_key: &[u8],
     plaintext: &[u8],
-    algorithm: DataEncryptionAlgorithm,
+    algo: &'static Algorithm,
 ) -> Result<(Vec<u8>, Vec<u8>), Error> {
     use aws_lc_rs::cipher::{EncryptionContext, PaddedBlockEncryptingKey, UnboundCipherKey};
     use aws_lc_rs::iv::FixedLength;
-    let algo = match algorithm {
-        DataEncryptionAlgorithm::Aes128Cbc => &AES_128,
-        DataEncryptionAlgorithm::Aes256Cbc => &AES_256,
-        _ => {
-            return Err(Error::DisallowedAlgorithm {
-                alg: "not cbc".into(),
-            });
-        }
-    };
     let key = UnboundCipherKey::new(algo, session_key).map_err(|_err| Error::DecryptFailed {
         reason: "key size mismatch",
     })?;
@@ -294,17 +291,8 @@ fn encrypt_cbc_fips(
 fn encrypt_gcm_fips(
     session_key: &[u8],
     plaintext: &[u8],
-    algorithm: DataEncryptionAlgorithm,
+    algo: &'static aws_lc_rs::aead::Algorithm,
 ) -> Result<(Vec<u8>, Vec<u8>), Error> {
-    let algo = match algorithm {
-        DataEncryptionAlgorithm::Aes128Gcm => &AES_128_GCM,
-        DataEncryptionAlgorithm::Aes256Gcm => &AES_256_GCM,
-        _ => {
-            return Err(Error::DisallowedAlgorithm {
-                alg: "not gcm".into(),
-            });
-        }
-    };
     let key = UnboundKey::new(algo, session_key).map_err(|_err| Error::DecryptFailed {
         reason: "key size mismatch",
     })?;
