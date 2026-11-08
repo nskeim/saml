@@ -24,9 +24,10 @@ pub(crate) fn check() -> Result<(), &'static str> {
 ///
 /// Aborts the process (matching the entropy-source failure policy in
 /// `crate::crypto::entropy`) rather than continuing with non-FIPS crypto.
-/// Called as a backstop at the top of every core FIPS crypto operation, so a
-/// deployment that never calls the public `assert_fips_mode()` still fails
-/// closed on first crypto use.
+/// Called as a backstop at the top of every AWS-LC crypto entry point
+/// (digest, sign, verify, entropy, AEAD, AES-CBC, RSA-OAEP, HMAC, and the
+/// artifact SourceID SHA-1), so a deployment that never calls the public
+/// `assert_fips_mode()` still fails closed on first crypto use.
 pub(crate) fn ensure() {
     if check().is_err() {
         std::process::abort();

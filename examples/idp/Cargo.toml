@@ -29,6 +29,7 @@ saml = { path = "../..", default-features = false, features = [
     "xmlenc",
     "metadata-emit",
     "slo",
+    "fips",
 ] }
 
 # Web stack

@@ -43,16 +43,54 @@ pub struct HttpResponse {
 mod reqwest_impl {
     use super::{Future, HttpClient, HttpRequest, HttpResponse};
 
+    /// Install the process-default rustls [`CryptoProvider`] for this build.
+    ///
+    /// Under `fips`, asserts AWS-LC is in FIPS mode and installs the aws-lc-rs
+    /// provider. Without `fips`, installs the ring provider. Safe to call more
+    /// than once: a second install is ignored if a provider is already set.
+    ///
+    /// Call this before constructing a custom [`reqwest::Client`] if you are
+    /// not using [`ReqwestClient::default`].
+    pub fn install_default_crypto_provider() {
+        #[cfg(feature = "fips")]
+        {
+            if crate::assert_fips_mode().is_err() {
+                std::process::abort();
+            }
+            // Both `ring` and `aws_lc_rs` rustls features may be enabled when
+            // `fips` + `reqwest-client` are on; rustls then requires an
+            // explicit install. Prefer AWS-LC and require its FIPS flag.
+            let provider = rustls::crypto::aws_lc_rs::default_provider();
+            if !provider.fips() {
+                std::process::abort();
+            }
+            // Err means another provider won the race; either way a default is set.
+            match provider.install_default() {
+                Ok(()) | Err(_) => {}
+            }
+        }
+        #[cfg(not(feature = "fips"))]
+        {
+            match rustls::crypto::ring::default_provider().install_default() {
+                Ok(()) | Err(_) => {}
+            }
+        }
+    }
+
     /// `HttpClient` implementation backed by `reqwest`.
     ///
     /// The wrapped `reqwest::Client` is `pub` so callers that already hold a
     /// configured client (proxies, TLS settings, connection pooling) can hand
-    /// it in directly: `ReqwestClient(my_existing_client)`.
+    /// it in directly: `ReqwestClient(my_existing_client)`. When constructing
+    /// your own client under a `fips` build, call
+    /// [`install_default_crypto_provider`] first (or ensure an equivalent
+    /// AWS-LC FIPS rustls provider is already installed).
     #[derive(Debug, Clone)]
     pub struct ReqwestClient(pub reqwest::Client);
 
     impl Default for ReqwestClient {
         fn default() -> Self {
+            install_default_crypto_provider();
             Self(reqwest::Client::new())
         }
     }
@@ -97,7 +135,7 @@ mod reqwest_impl {
 }
 
 #[cfg(feature = "reqwest-client")]
-pub use reqwest_impl::ReqwestClient;
+pub use reqwest_impl::{ReqwestClient, install_default_crypto_provider};
 
 #[cfg(test)]
 mod tests {
@@ -147,5 +185,18 @@ mod tests {
         let resp = client.send(req).await.expect("echo");
         assert_eq!(resp.status, 200);
         assert_eq!(resp.body, b"hello");
+    }
+
+    #[cfg(all(feature = "reqwest-client", feature = "fips"))]
+    #[test]
+    fn reqwest_default_installs_fips_provider() {
+        install_default_crypto_provider();
+        let provider = rustls::crypto::CryptoProvider::get_default()
+            .expect("provider installed");
+        assert!(
+            provider.fips(),
+            "default ReqwestClient TLS provider must report FIPS mode"
+        );
+        let _client = ReqwestClient::default();
     }
 }
