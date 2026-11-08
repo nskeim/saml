@@ -487,6 +487,7 @@ impl PublicKey {
         signed_bytes: &[u8],
         signature_bytes: &[u8],
     ) -> Result<(), Error> {
+        crate::crypto::fips::ensure();
         match (&self.inner, algorithm) {
             (PublicKeyInner::Rsa(_), SignatureAlgorithm::RsaSha256) => verify_rsa_fips(
                 &RSA_PKCS1_2048_8192_SHA256,
