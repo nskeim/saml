@@ -5,9 +5,11 @@
 [![crates.io](https://img.shields.io/crates/v/saml.svg)](https://crates.io/crates/saml)
 [![docs.rs](https://img.shields.io/docsrs/saml)](https://docs.rs/saml)
 
-Stateless, async-native SAML 2.0 toolkit with no libxml2 / xmlsec C build chain.
+Stateless, async-native SAML 2.0 toolkit with **FIPS-module-backed crypto by default** (AWS-LC) and no libxml2 / xmlsec build chain.
 
-`saml` implements the SAML 2.0 protocol — Service Provider, Identity Provider, and proxy composition — in pure Rust. XML, XML-DSig, XML-Canonicalization, and XML-Encryption are reimplemented on top of `quick-xml` and the RustCrypto stack; there is no `libxml2`, `libxmlsec1`, `libxslt`, `libclang`, or `openssl` dependency. The HTTP backchannel is bring-your-own via the [`HttpClient`] trait (with an optional `reqwest` adapter).
+`saml` implements the SAML 2.0 protocol — Service Provider, Identity Provider, and proxy composition. XML, XML-DSig, XML-Canonicalization, and XML-Encryption are reimplemented on top of `quick-xml`. **By default**, cryptographic operations and `ReqwestClient` TLS run on the FIPS 140-3 validated **AWS-LC** module via `aws-lc-rs` (requires a C compiler, `cmake`, and `go` at build time). Pure-Rust RustCrypto paths remain available as an explicit opt-out. There is no `libxml2`, `libxmlsec1`, `libxslt`, `libclang`, or `openssl` dependency. The HTTP backchannel is bring-your-own via the [`HttpClient`] trait (with an optional `reqwest` adapter that installs the AWS-LC FIPS rustls provider under default features).
+
+Evidence pack: [`docs/fips/`](docs/fips/README.md).
 
 ## Status
 
@@ -17,9 +19,9 @@ Pre-release: **v0.1.0-alpha.1**. The protocol surface described below is impleme
 
 | Dimension | `saml` | `samael` |
 | --- | --- | --- |
-| Native deps for SAML protocol | None — Rust-only XML / DSig / C14N / XML-Enc | libxml2 + libxmlsec1 + libxslt + libclang + libtool + libiconv |
-| HTTP backchannel | Bring-your-own via `HttpClient`; optional `reqwest-client` feature | Bundled |
-| Cross-compile (musl, distroless, arm64, wasm) | Clean on any `rustc` target for the protocol layer | Requires native libs on every target |
+| Native deps for SAML protocol | Default: AWS-LC FIPS (cmake/go). Opt-out: Rust-only XML / DSig / C14N / XML-Enc | libxml2 + libxmlsec1 + libxslt + libclang + libtool + libiconv |
+| HTTP backchannel | Bring-your-own via `HttpClient`; optional `reqwest-client` (FIPS TLS provider by default) | Bundled |
+| Cross-compile (musl, distroless, arm64, wasm) | Pure-Rust opt-out is clean on any `rustc` target; default FIPS needs AWS-LC toolchain | Requires native libs on every target |
 | `cargo audit` coverage | Full for the protocol layer | Splits across `cargo audit` + OS packages |
 | Stateless API | Yes — caller owns clock, persistence, replay store | Mixed |
 | Role split | `ServiceProvider` / `IdentityProvider` / `SpDescriptor` / `IdpDescriptor` as distinct types | Closer to one type per role |
@@ -44,8 +46,9 @@ See [`docs/rfcs/RFC-001-architecture.md`](docs/rfcs/RFC-001-architecture.md) §1
 | `idp-disco` | no | IdP Discovery: Common Domain Cookie codec + discovery service protocol (request/response, return-URL validation) + `<idpdisc:DiscoveryResponse>` metadata. No extra dependencies. |
 | `ecp` | no | ECP / PAOS profile (Enhanced Client or Proxy) for non-browser clients. Reuses the `binding::soap` envelope; no extra dependencies. |
 | `weak-algos` | no | SHA-1 digest, RSA-PKCS1-v1.5 key transport, DSA-SHA1. Off by default; opt in only for legacy peer interop. |
+| `fips` | **yes** | Route SAML crypto **and** `ReqwestClient` TLS through the FIPS 140-3 validated AWS-LC module via `aws-lc-rs` / rustls FIPS provider. Requires a C compiler, `cmake`, and `go`. Does **not** CMVP-certify this crate. See [FIPS mode](#fips-mode) and [`docs/fips/`](docs/fips/README.md). |
 
-The protocol layer compiles for any target `rustc` supports, including `wasm32-unknown-unknown` with `default-features = false`.
+Default builds need the AWS-LC toolchain. Pure-Rust / wasm builds use `--no-default-features` and omit `fips`.
 
 ## Install
 
@@ -53,10 +56,11 @@ The protocol layer compiles for any target `rustc` supports, including `wasm32-u
 cargo add saml
 ```
 
-Minimal build, opt out of the bundled `reqwest` HTTP client:
+Pure-Rust opt-out (no AWS-LC / no FIPS), still with protocol features:
 
 ```sh
-cargo add saml --no-default-features --features rsa-sha,ecdsa-sha,xmlenc,slo,metadata-emit,xsd-validate
+cargo add saml --no-default-features \
+  --features reqwest-client,rsa-sha,ecdsa-sha,xmlenc,slo,metadata-emit,xsd-validate
 ```
 
 ## Quick example — Service Provider
@@ -193,8 +197,27 @@ Out of scope for v0.1 (see [`docs/rfcs/RFC-001-architecture.md`](docs/rfcs/RFC-0
 - **DTD, internal entities, and processing instructions are rejected** at parse time, eliminating the XXE / billion-laughs class.
 - **Detached query-string signatures** (HTTP-Redirect binding) go through a distinct verification entry point with the same `allowed_algorithms` discipline as XML-DSig.
 - **`unsafe_code` is forbidden** at the crate root.
+- **FIPS module backing by default.** See [FIPS mode](#fips-mode).
 
 See [`docs/rfcs/RFC-002-xml-crypto-core.md`](docs/rfcs/RFC-002-xml-crypto-core.md) for the full crypto-layer threat model and [`docs/rfcs/RFC-001-architecture.md`](docs/rfcs/RFC-001-architecture.md) §2 for the operational principles.
+
+## FIPS mode
+
+**Default.** SAML digests, signatures, xmlenc, HMAC, AEAD seals, randomness, and `ReqwestClient` TLS run on the **FIPS 140-3 validated AWS-LC module** (`aws-lc-rs` / rustls FIPS provider, statically linked). Call `saml::assert_fips_mode()` at process startup; `ReqwestClient::default()` also asserts and installs the FIPS rustls provider.
+
+What this is **not**:
+
+- It does **not** make `saml` itself CMVP / FIPS-certified — only AWS-LC is the validated module.
+- PEM/DER key parse and PKCS#8 re-encode still use RustCrypto containers before AWS-LC import ([docs/fips/BOUNDARY.md](docs/fips/BOUNDARY.md)).
+- Do not combine with `weak-algos` unless you accept the pure-Rust residual paths a hand-built policy can reopen.
+
+**Evidence:** `./scripts/fips-evidence.sh` and CI artifact `fips-evidence`. Full pack: [`docs/fips/`](docs/fips/README.md).
+
+```sh
+cargo add saml   # fips is already in default features
+# build host needs: C compiler, cmake, go
+./scripts/fips-evidence.sh
+```
 
 ## Fuzzing
 

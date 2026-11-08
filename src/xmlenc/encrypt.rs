@@ -267,6 +267,7 @@ fn encrypt_cbc_fips(
     plaintext: &[u8],
     algo: &'static Algorithm,
 ) -> Result<(Vec<u8>, Vec<u8>), Error> {
+    crate::crypto::fips::ensure();
     use aws_lc_rs::cipher::{EncryptionContext, PaddedBlockEncryptingKey, UnboundCipherKey};
     use aws_lc_rs::iv::FixedLength;
     let key = UnboundCipherKey::new(algo, session_key).map_err(|_err| Error::DecryptFailed {
@@ -293,6 +294,7 @@ fn encrypt_gcm_fips(
     plaintext: &[u8],
     algo: &'static aws_lc_rs::aead::Algorithm,
 ) -> Result<(Vec<u8>, Vec<u8>), Error> {
+    crate::crypto::fips::ensure();
     let key = UnboundKey::new(algo, session_key).map_err(|_err| Error::DecryptFailed {
         reason: "key size mismatch",
     })?;
@@ -314,6 +316,7 @@ fn wrap_session_key_fips(
     algorithm: KeyTransportAlgorithm,
     session_key: &[u8],
 ) -> Result<Vec<u8>, Error> {
+    crate::crypto::fips::ensure();
     let public_key = PublicEncryptingKey::from_der(spki_der).map_err(|_err| Error::X509Parse)?;
     let oaep_public = OaepPublicEncryptingKey::new(public_key).map_err(|_err| Error::X509Parse)?;
     match algorithm {

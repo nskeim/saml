@@ -6,7 +6,7 @@ name = "saml"
 version = "0.1.0-alpha.1"
 edition = "2024"
 rust-version = "1.91.0"
-description = "Stateless, async-native SAML 2.0 toolkit with no libxml2/xmlsec C build chain"
+description = "Stateless, async-native SAML 2.0 toolkit with FIPS-module-backed crypto by default (AWS-LC); no libxml2/xmlsec"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/danielkov/saml"
 homepage = "https://github.com/danielkov/saml"
@@ -56,15 +56,27 @@ http = "1"
 url = "2"
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
+# No hardwired ring provider: `ReqwestClient` installs aws-lc (FIPS) or ring
+# at runtime depending on whether `fips` is enabled. See docs/fips/.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider"], optional = true }
+# Direct rustls so we can install a CryptoProvider. `ring` stays available for
+# the non-FIPS opt-out; `fips` adds `rustls/fips` (AWS-LC FIPS provider).
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"], optional = true }
 percent-encoding = "2"
 zeroize = { version = "1", features = ["derive"] }
 subtle = "2"
-aws-lc-rs = { version = "1", optional = true, features = ["fips"] }
+# `default-features = false` keeps the non-FIPS `aws-lc-sys` out of *our*
+# declaration; `alloc` / `ring-io` / `ring-sig-verify` restore the API surface.
+# Note: `rustls/fips` may still unify `aws-lc-sys` into the graph (documented
+# in docs/fips/BOUNDARY.md); runtime FIPS mode is attested via try_fips_mode.
+aws-lc-rs = { version = "1", optional = true, default-features = false, features = ["alloc", "ring-io", "ring-sig-verify", "fips"] }
 
 [features]
-default = ["reqwest-client", "rsa-sha", "ecdsa-sha", "xmlenc", "slo", "metadata-emit", "xsd-validate"]
-reqwest-client = ["dep:reqwest"]
+# This fork defaults to FIPS-module-backed SAML crypto + TLS. Build needs a C
+# compiler, cmake, and go. Opt out with `--no-default-features` and the
+# feature list without `fips` (pure-Rust paths remain). See docs/fips/.
+default = ["reqwest-client", "rsa-sha", "ecdsa-sha", "xmlenc", "slo", "metadata-emit", "xsd-validate", "fips"]
+reqwest-client = ["dep:reqwest", "dep:rustls", "rustls/ring"]
 rsa-sha = []
 ecdsa-sha = []
 xmlenc = []
@@ -86,11 +98,10 @@ idp-disco = []
 # desktop apps and federated CLI tooling. Layers a SOAP envelope + PAOS header
 # blocks on top of the existing assertion machinery; reuses `binding::soap`.
 ecp = []
-# FIPS-validated cryptography: route all crypto through AWS-LC (aws-lc-rs
-# with its `fips` feature, statically linked). All crypto paths — digests,
-# signing/verification, key transport, HMAC, AES-GCM/CBC seals — are routed;
-# see docs/rfcs/RFC-009-fips.md.
-fips = ["dep:aws-lc-rs", "aws-lc-rs/fips"]
+# Route SAML crypto and (with `reqwest-client`) rustls TLS through the
+# FIPS 140-3 validated AWS-LC module via aws-lc-rs. Does not CMVP-certify
+# this crate. See docs/fips/ and docs/rfcs/RFC-009-fips.md.
+fips = ["dep:aws-lc-rs", "aws-lc-rs/fips", "rustls?/fips"]
 weak-algos = ["dep:sha1"]
 # Structural XSD-style schema validation of inbound SAML messages. On by
 # default; opt-out via `default-features = false` for permissive interop with
@@ -101,6 +112,11 @@ xsd-validate = []
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 proptest = "1"
 hex = "0.4"
+
+[[test]]
+name = "fips_attestation"
+path = "tests/fips_attestation.rs"
+required-features = ["fips"]
 
 [lints.rust]
 unsafe_code = "forbid"

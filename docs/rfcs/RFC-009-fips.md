@@ -1,23 +1,33 @@
-# RFC-009: FIPS-Validated Cryptography
+# RFC-009: AWS-LC FIPS Module-Backed Cryptography
 
 **Status**: Draft
 **Date**: 2026-07-14
 
 ## Summary
 
-The `fips` Cargo feature routes the crate's cryptographic primitives through
-**AWS-LC** (the `aws-lc-rs` binding with its `fips` feature), the FIPS 140-3
-validated module. AWS-LC is built and **linked statically into the binary**, so
-the validated module ships with the crate rather than being a runtime dependency.
-This RFC records what the feature covers today, how it is gated, and what is
-deferred, so an operator can tell at a glance which crypto paths are FIPS-backed
-and which still run on the pure-Rust fallback.
+The `fips` Cargo feature routes the crate's cryptographic *operations* through
+**AWS-LC** (the `aws-lc-rs` binding with its `fips` feature), a FIPS 140-3
+validated cryptographic module. AWS-LC is built and **linked statically into
+the binary**, so the validated module ships with the crate rather than being a
+runtime dependency. **In this fork, `fips` is part of the Cargo `default`
+feature set**, so a plain `cargo build` is a FIPS build. Pure-Rust behavior
+remains available via `--no-default-features` without `fips`.
+
+With `reqwest-client` (also default), TLS uses rustls with the AWS-LC FIPS
+`CryptoProvider` installed by `ReqwestClient::default` /
+`install_default_crypto_provider()`.
+
+This does **not** make the `saml` crate itself FIPS-validated or CMVP-certified.
+Only cryptographic modules receive FIPS certificates; this crate is an
+application of that module. Operators who need a FIPS-compliant deployment must
+still treat key provenance and any `weak-algos` policy overrides as separate
+boundary decisions (see §1, §7, and `docs/fips/`).
 
 The design principle is *feature-gated, not a fork*: every routed primitive keeps
 its pure-Rust implementation and is selected at compile time behind
-`#[cfg(feature = "fips")]`. A default build is byte-for-byte the crate's existing
-pure-Rust behavior; a `fips` build swaps in AWS-LC for the paths this RFC lists.
-No public API changes and no new enum variants are introduced by the routing.
+`#[cfg(feature = "fips")]`. No public API changes and no new enum variants are
+introduced by the routing. Auditor-facing evidence lives in `docs/fips/` and
+`./scripts/fips-evidence.sh`.
 
 ---
 
@@ -29,12 +39,19 @@ In scope (this RFC):
 - The policy restrictions a FIPS build enforces.
 - How `fips` interacts with the other crypto features (`weak-algos`,
   `artifact-binding`).
+- Runtime FIPS-mode assertion coverage.
+- Explicit cryptographic boundary: what remains outside AWS-LC.
 
 Out of scope:
 
 - The pure-Rust implementations themselves (unchanged).
-- Transport-layer TLS (rustls) — that is the caller's / `reqwest-client`'s
-  concern, not this crate's.
+- **CMVP certification of this crate** — impossible and not claimed; validation
+  attaches to AWS-LC.
+- **Key lifecycle parse/encode** — PEM/DER load and PKCS#8 re-encode still use
+  RustCrypto containers (`rsa` / `p256` / `p384`) before material is imported
+  into AWS-LC for crypto ops. See §7.
+- **Example apps' own HTTP clients** — only `saml::ReqwestClient` is covered
+  by the crate TLS claim; demos may declare separate `reqwest` deps.
 
 ## 2. What is routed
 
@@ -107,7 +124,8 @@ A FIPS build enforces the following at validation time (before any crypto runs):
   hard guarantee should not enable `weak-algos`.
 - **`artifact-binding`.** Independent of `fips`; it enables SHA-1 for the
   artifact `SourceID` routing tag only (a collision misroutes rather than forges)
-  and does not affect signature or key-transport crypto.
+  and does not affect signature or key-transport crypto. Under `fips` that SHA-1
+  still runs through AWS-LC's legacy digest API.
 
 ## 5. FIPS posture and the `rsa` advisory
 
@@ -117,11 +135,11 @@ RUSTSEC-2023-0071 "Marvin Attack" timing exposure on RSA **signing** and
 **verification**. PRs C2, C3, C4 and C5 route the remaining paths — xmlenc
 AES-GCM/CBC, RSA-OAEP key transport, the proxy HMAC-SHA-256 / AES-256-GCM
 codec, and the login-tracker and artifact-transaction AES-256-GCM seals — to
-AWS-LC as well, so a FIPS build's default posture runs every crypto primitive
-on the validated module. The only pure-Rust `rsa` code still reachable in a
+AWS-LC as well, so a FIPS build's default posture runs every crypto *operation*
+on the validated module. The only pure-Rust `rsa` *crypto* still reachable in a
 FIPS build is the legacy RSA-PKCS#1-v1.5 key-transport path, which `weak-algos`
 gates and the default policy refuses; see `SECURITY.md` → "Known Advisories"
-for the full advisory text.
+for the full advisory text. Key parse/encode still uses RustCrypto (§7).
 
 ### Runtime FIPS-mode assertion
 
@@ -129,13 +147,56 @@ A FIPS build must actually *run* the validated module, not just link it.
 `assert_fips_mode()` (public) checks at startup that the linked AWS-LC module
 is in FIPS mode and fails closed otherwise, catching a build mistake (e.g.
 `aws-lc-rs` linked without its `fips` feature). The same check runs as a
-fail-closed backstop on the first FIPS crypto operation — digest, sign, or
-verify — so a deployment that never calls the startup check still refuses to run
+fail-closed backstop on **every** AWS-LC crypto entry point — digests, sign,
+verify, entropy, AEAD seals, AES-CBC, RSA-OAEP, HMAC, and artifact SourceID —
+so a deployment that never calls the startup check still refuses to run
 non-FIPS crypto. See `SECURITY.md` → "FIPS Mode" for the operator-facing
 description.
 
 ## 6. Build requirements
 
 A `fips` build compiles AWS-LC from source (the bundled `.cmake`/`.go`), so the
-build environment needs a C compiler, `cmake`, and `go`. The CI `fips` lane
-installs these and runs `cargo clippy` / `cargo test` with `--features fips`.
+build environment needs a C compiler, `cmake`, and `go`. The dependency is
+declared with `default-features = false` so only `aws-lc-fips-sys` is pulled,
+not the non-FIPS `aws-lc-sys`. The CI `fips` lane installs cmake/go and runs
+`cargo clippy` / `cargo test` with `--features fips`.
+
+## 7. Key lifecycle boundary (out of cryptographic module scope)
+
+Under `fips`, keys are still **parsed and held** as RustCrypto types
+(`rsa::RsaPrivateKey`, `p256`/`p384` signing keys, etc.) and re-encoded to
+PKCS#8 / SPKI DER before import into AWS-LC for signing, verification, and
+OAEP. That parse/encode path is:
+
+- **Not** a FIPS-approved cryptographic service in the CMVP sense.
+- **Documented as outside the validated-module boundary** for this crate's
+  FIPS posture: the cryptographic *operations* (sign, verify, encrypt, decrypt,
+  MAC, digest, RNG) run on AWS-LC; containerization of key material before
+  import does not.
+- Unchanged by design for now — migrating parse/hold entirely onto AWS-LC
+  key types is deferred. Operators who require keys never to touch non-module
+  code should inject keys via a custom `SignatureVerifier` / HSM-backed path
+  (RFC-002 §4) rather than PEM load through `KeyPair`.
+
+Test-only RSA key generation remains pure-Rust and is not part of the
+production API.
+
+## 8. TLS (ReqwestClient)
+
+Under `fips` + `reqwest-client` (the default):
+
+| Layer | Backend |
+| --- | --- |
+| XML-DSig / xmlenc / seals / HMAC / RNG | AWS-LC FIPS module |
+| `ReqwestClient` TLS | rustls + `aws_lc_rs` provider with `CryptoProvider::fips() == true` |
+
+`reqwest` is built with `rustls-tls-webpki-roots-no-provider`. At
+`ReqwestClient::default` (and `install_default_crypto_provider`), the process
+asserts AWS-LC FIPS mode and installs the aws-lc-rs rustls provider. Without
+`fips`, the same entry points install the ring provider instead.
+
+Operators who bring their own `reqwest::Client` must call
+`install_default_crypto_provider()` (or equivalent) first. Call
+`saml::assert_fips_mode()` at process startup and treat failure as a hard
+deploy error. Do not enable `weak-algos` unless an exception process accepts
+the pure-Rust residual paths.

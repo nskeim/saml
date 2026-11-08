@@ -11,6 +11,7 @@
 pub(crate) fn try_fill_random(buf: &mut [u8]) -> Result<(), ()> {
     #[cfg(feature = "fips")]
     {
+        crate::crypto::fips::ensure();
         use aws_lc_rs::rand::{SecureRandom as _, SystemRandom};
         SystemRandom::new().fill(buf).map_err(|_err| ())
     }

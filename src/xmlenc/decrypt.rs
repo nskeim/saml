@@ -380,6 +380,7 @@ fn decrypt_cbc_fips(
     ciphertext: &[u8],
     algo: &'static Algorithm,
 ) -> Result<Vec<u8>, Error> {
+    crate::crypto::fips::ensure();
     if ciphertext.len() < 16 {
         return Err(Error::DecryptFailed { reason: "data" });
     }
@@ -408,6 +409,7 @@ fn decrypt_gcm_fips(
     ciphertext: &[u8],
     algo: &'static aws_lc_rs::aead::Algorithm,
 ) -> Result<Vec<u8>, Error> {
+    crate::crypto::fips::ensure();
     if ciphertext.len() < 12 + 16 {
         return Err(Error::DecryptFailed { reason: "data" });
     }

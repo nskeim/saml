@@ -3,11 +3,14 @@
 //! # Features
 //!
 //! - SAML 2.0 Service Provider, Identity Provider, and proxy composition.
-//! - Pure-Rust XML / XML-DSig / XML-Canonicalization / XML-Encryption.
-//! - No libxml2 / xmlsec / openssl C build chain.
+//! - XML / XML-DSig / XML-Canonicalization / XML-Encryption without libxml2 /
+//!   xmlsec / openssl.
+//! - **FIPS by default:** SAML crypto and [`ReqwestClient`] TLS use the
+//!   FIPS 140-3 validated AWS-LC module (`fips` feature). Pure-Rust paths
+//!   remain behind `#[cfg(not(feature = "fips"))]`. See `docs/fips/`.
 //! - Async-runtime-agnostic backchannel HTTP via the [`HttpClient`] trait
-//!   (bring-your-own; optional [`reqwest`] feature inherits whatever
-//!   transitive deps the caller's reqwest configuration brings).
+//!   (bring-your-own; optional `reqwest-client` installs the AWS-LC FIPS
+//!   rustls provider under default features).
 //! - Stateless API: caller owns clock, persistence, replay storage.
 //! - XSW-resistant by structure: validated payload extraction is bound to
 //!   the signature's resolved element via [`VerifiedSignature`].
@@ -303,12 +306,14 @@
 //!
 //! # Feature flags
 //!
-//! - `reqwest-client` (default) — optional [`ReqwestClient`] adapter.
+//! - `reqwest-client` (default) — optional [`ReqwestClient`] adapter (FIPS TLS
+//!   provider when `fips` is on).
 //! - `rsa-sha` (default) — RSA-SHA256/384/512 signature algorithms.
 //! - `ecdsa-sha` (default) — ECDSA-SHA256/384/512 signature algorithms.
 //! - `xmlenc` (default) — XML Encryption (EncryptedAssertion).
 //! - `slo` (default) — Single Logout.
 //! - `metadata-emit` (default) — `metadata_xml` / `metadata_xml_with_extras`.
+//! - `fips` (default) — AWS-LC FIPS module for SAML crypto + ReqwestClient TLS.
 //! - `artifact-binding` — HTTP-Artifact binding. Pulls in `sha1` for the
 //!   spec-mandated `SourceID` derivation (Bindings §3.6.4); this is
 //!   independent of `weak-algos`, which governs weak signature and digest
@@ -318,7 +323,7 @@
 //! - `ecp` — Enhanced Client or Proxy profile + PAOS binding (off by default).
 //! - `weak-algos` — SHA-1 / RSA-PKCS#1-v1.5 / DSA-SHA1 (off by default).
 //!
-//! See `docs/rfcs/RFC-001-architecture.md` for the full design discussion.
+//! See `docs/fips/` and `docs/rfcs/RFC-001-architecture.md`.
 
 #![forbid(unsafe_code)]
 
@@ -392,9 +397,10 @@ pub use crate::crypto::verifier::{DefaultVerifier, KeyInfo, SignatureVerifier, V
 /// was linked without its `fips` feature. The module also self-verifies at
 /// load and refuses to operate on failure, so a FIPS build cannot silently
 /// run non-FIPS crypto; this gives an explicit startup assertion to log or
-/// monitor. The same check runs lazily as a backstop on the first FIPS crypto
-/// operation (digest, sign, verify), so even a deployment that never calls
-/// this function fails closed on first use.
+/// monitor. The same check runs lazily as a backstop on every AWS-LC crypto
+/// entry point (digest, sign, verify, entropy, AEAD, AES-CBC, RSA-OAEP, HMAC,
+/// artifact SourceID), so even a deployment that never calls this function
+/// fails closed on first use.
 #[cfg(feature = "fips")]
 pub fn assert_fips_mode() -> Result<(), Error> {
     crate::crypto::fips::check().map_err(|reason| Error::InvalidConfiguration { reason })
@@ -483,7 +489,7 @@ pub use crate::logout::{
 };
 
 #[cfg(feature = "reqwest-client")]
-pub use crate::http::ReqwestClient;
+pub use crate::http::{ReqwestClient, install_default_crypto_provider};
 
 // === Fuzzing hooks ===
 //

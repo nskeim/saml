@@ -121,6 +121,7 @@ pub(crate) fn parse_type4_artifact(artifact: &str) -> Result<Type4Artifact, Erro
 pub(crate) fn source_id(issuer_entity_id: &str) -> [u8; 20] {
     #[cfg(feature = "fips")]
     {
+        crate::crypto::fips::ensure();
         let mut out = [0u8; 20];
         out.copy_from_slice(
             aws_lc_rs::digest::digest(

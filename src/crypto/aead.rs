@@ -14,6 +14,7 @@ pub(crate) fn gcm_seal(
     aad: &[u8],
     reason: &'static str,
 ) -> Result<Vec<u8>, Error> {
+    crate::crypto::fips::ensure();
     let less_safe = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, key).map_err(|_err| {
         Error::InvalidConfiguration {
             reason: "AES-256-GCM key size mismatch",
@@ -38,6 +39,7 @@ pub(crate) fn gcm_open(
     aad: &[u8],
     reason: &'static str,
 ) -> Result<Vec<u8>, Error> {
+    crate::crypto::fips::ensure();
     let nonce: [u8; 12] = nonce
         .try_into()
         .map_err(|_err| Error::DecryptFailed { reason })?;

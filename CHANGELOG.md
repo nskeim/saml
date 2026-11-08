@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`fips` Cargo feature (now in `default`).** Routes digests, RSA/ECDSA sign
+  and verify, xmlenc AES-GCM/CBC and RSA-OAEP, proxy HMAC-SHA-256 / AES-256-GCM,
+  SP login-tracker and IdP artifact-transaction seals, and crate RNG through
+  the FIPS 140-3 validated AWS-LC module via `aws-lc-rs`. Public
+  `assert_fips_mode()` plus a fail-closed backstop on every AWS-LC crypto entry
+  point. Does **not** CMVP-certify the crate.
+- **FIPS TLS for `ReqwestClient`.** `reqwest` uses
+  `rustls-tls-webpki-roots-no-provider`; `ReqwestClient::default` /
+  `install_default_crypto_provider()` install the aws-lc-rs FIPS rustls
+  `CryptoProvider` (ring provider when `fips` is off).
+- **Evidence pack** under `docs/fips/`, `./scripts/fips-evidence.sh`,
+  `tests/fips_attestation.rs`, and CI job/artifact `fips-evidence`.
+
+### Changed
+
+- **Default features include `fips`.** Default builds need cmake + go. Pure-Rust
+  remains available via `--no-default-features` without `fips`.
+- `aws-lc-rs` is declared with `default-features = false` under `fips`.
+  Enabling `rustls/fips` may still unify `aws-lc-sys` into the graph; runtime
+  attestation uses `try_fips_mode()` / `CryptoProvider::fips()` (see
+  `docs/fips/BOUNDARY.md`).
+
 ## [0.1.0-alpha.1] - 2026-10-04
 
 ### Added

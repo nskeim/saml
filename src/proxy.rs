@@ -1499,12 +1499,15 @@ impl NameIdTransform for PersistentPerSpHmac {
             msg.extend_from_slice(field.as_bytes());
         }
         #[cfg(feature = "fips")]
-        let digest = aws_lc_rs::hmac::sign(
-            &aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, &self.key),
-            &msg,
-        )
-        .as_ref()
-        .to_vec();
+        let digest = {
+            crate::crypto::fips::ensure();
+            aws_lc_rs::hmac::sign(
+                &aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, &self.key),
+                &msg,
+            )
+            .as_ref()
+            .to_vec()
+        };
         #[cfg(not(feature = "fips"))]
         let digest = {
             let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&self.key).map_err(|_err| {

@@ -666,6 +666,7 @@ impl KeyPair {
 
         #[cfg(feature = "fips")]
         {
+            crate::crypto::fips::ensure();
             let oaep_alg = match (oaep_digest, mgf1_digest) {
                 (OaepDigest::Sha1, OaepDigest::Sha1) => &OAEP_SHA1_MGF1SHA1,
                 (OaepDigest::Sha256, OaepDigest::Sha256) => &OAEP_SHA256_MGF1SHA256,

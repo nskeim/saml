@@ -93,10 +93,13 @@ The following are **out of scope** — protect against them at a higher layer:
 
 ## FIPS Mode
 
-The `fips` Cargo feature routes the crate's cryptographic primitives through
-**AWS-LC** (the `aws-lc-rs` binding with its `fips` feature), the FIPS 140-3
-validated module, linked statically into the binary. See **RFC-009**
-(`docs/rfcs/RFC-009-fips.md`) for the full posture.
+The `fips` Cargo feature is **on by default** in this fork. It routes the
+crate's cryptographic **operations** and `ReqwestClient` TLS through **AWS-LC**
+(the `aws-lc-rs` binding with its `fips` feature / rustls FIPS provider), a
+FIPS 140-3 validated cryptographic module, linked statically into the binary.
+This does **not** CMVP-certify the `saml` crate itself — only the module is
+FIPS-validated. See **`docs/fips/`** and **RFC-009** for the full posture and
+evidence pack.
 
 What a `fips` build changes:
 
@@ -105,6 +108,8 @@ What a `fips` build changes:
   RSA-OAEP key-transport paths, the proxy HMAC-SHA-256 / AES-256-GCM context
   codec, and the SP login-tracker and IdP artifact-resolve-transaction
   AES-256-GCM seals all run on AWS-LC (PRs A + B + C2 + C3 + C4 + C5).
+- **TLS.** `ReqwestClient::default` / `install_default_crypto_provider()`
+  install rustls's aws-lc-rs provider and require `CryptoProvider::fips()`.
 - **Policy.** Unpaired RSA-OAEP (label hash ≠ MGF1 hash) is rejected at
   validation time, and sub-2048-bit RSA keys are rejected by the module at
   verify time. `weak-algos` is ignored for the default policy under `fips` —
@@ -117,16 +122,24 @@ What a `fips` build changes:
 - **Runtime assertion.** `assert_fips_mode()` checks at startup that the
   linked AWS-LC module is actually in FIPS mode and fails closed otherwise,
   catching a build mistake (e.g. `aws-lc-rs` linked without its `fips`
-  feature). The same check also runs as a fail-closed backstop on the first
-  FIPS crypto operation, so a deployment that never calls it still refuses to
-  run non-FIPS crypto.
+  feature). The same check also runs as a fail-closed backstop on every
+  AWS-LC crypto entry point (digest, sign, verify, entropy, AEAD, AES-CBC,
+  RSA-OAEP, HMAC, artifact SourceID), so a deployment that never calls it
+  still refuses to run non-FIPS crypto.
+- **Key lifecycle boundary.** PEM/DER parse and PKCS#8 re-encode still use
+  RustCrypto key containers before material is imported into AWS-LC. Crypto
+  ops after import are module-backed; parse/encode is documented as outside
+  the validated-module boundary (`docs/fips/BOUNDARY.md`).
+- **Evidence.** `./scripts/fips-evidence.sh` and the CI `fips-evidence`
+  artifact record feature resolution, dependency trees, and runtime
+  `try_fips_mode` / rustls provider FIPS checks (`docs/fips/ATTESTATION.md`).
 
 **Effect on the `rsa` advisory.** Routing signing and verification to AWS-LC
 removes the pure-Rust `rsa` crate from those two paths in a FIPS build, closing
 the RUSTSEC-2023-0071 (Marvin) timing exposure on RSA signing and verification.
-With PR C2 landed, the only residual pure-Rust `rsa` exposure in a FIPS
-build is the legacy RSA-PKCS#1-v1.5 key-transport decryption path, which is
-gated behind `weak-algos` and refused by default. RSA-OAEP key transport now
+With PR C2 landed, the only residual pure-Rust `rsa` *crypto* exposure in a
+FIPS build is the legacy RSA-PKCS#1-v1.5 key-transport decryption path, which
+is gated behind `weak-algos` and refused by default. RSA-OAEP key transport now
 runs on AWS-LC.
 
 ## Known Advisories
