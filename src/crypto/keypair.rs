@@ -163,6 +163,9 @@ pub struct KeyPair {
     // FIPS build: lazily-built aws-lc-rs signer, cached after first use.
     #[cfg(feature = "fips")]
     aws_signer: std::sync::Mutex<std::option::Option<AwsSigningKey>>,
+    // FIPS build: lazily-built RSA-OAEP decrypter, cached after first use.
+    #[cfg(feature = "fips")]
+    aws_oaep_decrypter: std::sync::Mutex<std::option::Option<OaepPrivateDecryptingKey>>,
 }
 
 #[cfg(feature = "fips")]
@@ -175,6 +178,7 @@ impl Clone for KeyPair {
             cert: self.cert.clone(),
             public_key: self.public_key.clone(),
             aws_signer: std::sync::Mutex::new(None),
+            aws_oaep_decrypter: std::sync::Mutex::new(None),
         }
     }
 }
@@ -291,6 +295,8 @@ impl KeyPair {
             public_key,
             #[cfg(feature = "fips")]
             aws_signer: std::sync::Mutex::new(None),
+            #[cfg(feature = "fips")]
+            aws_oaep_decrypter: std::sync::Mutex::new(None),
         })
     }
 
@@ -309,6 +315,8 @@ impl KeyPair {
             public_key,
             #[cfg(feature = "fips")]
             aws_signer: std::sync::Mutex::new(None),
+            #[cfg(feature = "fips")]
+            aws_oaep_decrypter: std::sync::Mutex::new(None),
         })
     }
 
@@ -327,6 +335,8 @@ impl KeyPair {
             public_key,
             #[cfg(feature = "fips")]
             aws_signer: std::sync::Mutex::new(None),
+            #[cfg(feature = "fips")]
+            aws_oaep_decrypter: std::sync::Mutex::new(None),
         })
     }
 
@@ -529,6 +539,51 @@ impl KeyPair {
         Ok(guard)
     }
 
+    /// FIPS build: lazily build (and cache) the aws-lc-rs RSA-OAEP
+    /// decrypter from the stored secret. Returns a guard holding the built
+    /// decrypter; the first call builds it, later calls reuse the cache.
+    #[cfg(feature = "fips")]
+    fn aws_oaep_decrypter(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, Option<OaepPrivateDecryptingKey>>, Error> {
+        let mut guard =
+            self.aws_oaep_decrypter
+                .lock()
+                .map_err(|_e| Error::InvalidConfiguration {
+                    reason: "OAEP decrypter lock poisoned",
+                })?;
+        if guard.is_none() {
+            let KeyPairInner::Rsa(secret) = &self.inner else {
+                return Err(Error::InvalidConfiguration {
+                    reason: "not an RSA key",
+                });
+            };
+            *guard = Some(Self::build_aws_oaep_decrypter(secret)?);
+        }
+        Ok(guard)
+    }
+
+    /// FIPS build: build the aws-lc-rs RSA-OAEP decrypter from the stored
+    /// secret, re-encoded to PKCS#8 DER.
+    #[cfg(feature = "fips")]
+    fn build_aws_oaep_decrypter(secret: &RsaSecret) -> Result<OaepPrivateDecryptingKey, Error> {
+        use pkcs8::EncodePrivateKey as _;
+        let der = secret
+            .key
+            .to_pkcs8_der()
+            .map_err(|_e| Error::InvalidConfiguration {
+                reason: "failed to encode RSA private key",
+            })?;
+        let private_key = PrivateDecryptingKey::from_pkcs8(der.as_bytes()).map_err(|_e| {
+            Error::InvalidConfiguration {
+                reason: "aws-lc-rs rejected RSA key",
+            }
+        })?;
+        OaepPrivateDecryptingKey::new(private_key).map_err(|_e| Error::InvalidConfiguration {
+            reason: "aws-lc-rs rejected RSA-OAEP key",
+        })
+    }
+
     /// FIPS build: build the aws-lc-rs signer from the stored secret.
     #[cfg(feature = "fips")]
     fn build_aws_signer(&self) -> Result<AwsSigningKey, Error> {
@@ -595,6 +650,13 @@ impl KeyPair {
         oaep_digest: OaepDigest,
         mgf1_digest: OaepDigest,
     ) -> Result<Vec<u8>, Error> {
+        #[cfg_attr(
+            feature = "fips",
+            expect(
+                unused_variables,
+                reason = "secret is only used by the non-FIPS fallback path"
+            )
+        )]
         let KeyPairInner::Rsa(secret) = &self.inner else {
             return Err(Error::DecryptFailed {
                 reason: "key transport",
@@ -603,7 +665,6 @@ impl KeyPair {
 
         #[cfg(feature = "fips")]
         {
-            use pkcs8::EncodePrivateKey as _;
             let oaep_alg = match (oaep_digest, mgf1_digest) {
                 (OaepDigest::Sha1, OaepDigest::Sha1) => &OAEP_SHA1_MGF1SHA1,
                 (OaepDigest::Sha256, OaepDigest::Sha256) => &OAEP_SHA256_MGF1SHA256,
@@ -619,22 +680,12 @@ impl KeyPair {
                     });
                 }
             };
-            let der = secret
-                .key
-                .to_pkcs8_der()
-                .map_err(|_e| Error::InvalidConfiguration {
-                    reason: "failed to encode RSA private key",
-                })?;
-            let private_key = PrivateDecryptingKey::from_pkcs8(der.as_bytes()).map_err(|_e| {
-                Error::InvalidConfiguration {
-                    reason: "aws-lc-rs rejected RSA key",
-                }
-            })?;
-            let oaep_key = OaepPrivateDecryptingKey::new(private_key).map_err(|_e| {
-                Error::InvalidConfiguration {
-                    reason: "aws-lc-rs rejected RSA-OAEP key",
-                }
-            })?;
+            let guard = self.aws_oaep_decrypter()?;
+            let Some(oaep_key) = guard.as_ref() else {
+                return Err(Error::InvalidConfiguration {
+                    reason: "OAEP decrypter not initialized",
+                });
+            };
             let mut out = vec![0u8; oaep_key.min_output_size()];
             let written = oaep_key
                 .decrypt(oaep_alg, ciphertext, &mut out, None)
