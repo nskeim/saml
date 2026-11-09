@@ -28,8 +28,8 @@ fn assert_fips_mode_succeeds() {
 #[test]
 fn digest_and_sign_use_fips_module() {
     // Fingerprint + sign both call `fips::ensure()` then AWS-LC.
-    let cert = X509Certificate::from_pem(common::RSA_CERT_PEM)
-        .unwrap_or_else(|err| panic!("cert: {err}"));
+    let cert =
+        X509Certificate::from_pem(common::RSA_CERT_PEM).unwrap_or_else(|err| panic!("cert: {err}"));
     let fp = cert.fingerprint_sha256();
     assert_eq!(fp.len(), 32);
 
