@@ -191,8 +191,7 @@ mod tests {
     #[test]
     fn reqwest_default_installs_fips_provider() {
         install_default_crypto_provider();
-        let provider = rustls::crypto::CryptoProvider::get_default()
-            .expect("provider installed");
+        let provider = rustls::crypto::CryptoProvider::get_default().expect("provider installed");
         assert!(
             provider.fips(),
             "default ReqwestClient TLS provider must report FIPS mode"
