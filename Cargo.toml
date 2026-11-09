@@ -1,6 +1,3 @@
-[workspace]
-members = [".", "examples/demo", "examples/idp", "fuzz"]
-
 [package]
 name = "saml"
 version = "0.1.0-alpha.1"
@@ -33,22 +30,16 @@ exclude = [
 quick-xml = "0.41"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 base64 = "0.22"
-rsa = { version = "0.9", features = ["sha2"] }
-ecdsa = "0.16"
-p256 = { version = "0.13", features = ["ecdsa", "pem"] }
-p384 = { version = "0.13", features = ["ecdsa", "pem"] }
-sha1 = { version = "0.10", optional = true, features = ["oid"] }
-sha2 = { version = "0.10", features = ["oid"] }
+# `sha2` feature deliberately omitted: RSA signing / verification / OAEP go
+# through aws-lc-rs under `fips`. Non-FIPS builds (`rustcrypto` feature) use
+# the `sha2` crate directly for the digest type parameters.
+rsa = { version = "0.9", default-features = false, features = ["std", "pem", "u64_digit"] }
 rand = "0.9"
 x509-cert = { version = "0.2", features = ["pem"] }
 spki = "0.7"
 const-oid = "0.9"
 pkcs8 = { version = "0.10", features = ["pem"] }
 pkcs1 = { version = "0.7", features = ["pem"] }
-aes = "0.8"
-cbc = "0.1"
-aes-gcm = "0.10"
-hmac = "0.12"
 digest = "0.10"
 signature = "2"
 thiserror = "2"
@@ -56,56 +47,52 @@ http = "1"
 url = "2"
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
-# No hardwired ring provider: `ReqwestClient` installs aws-lc (FIPS) or ring
-# at runtime depending on whether `fips` is enabled. See docs/fips/.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider"], optional = true }
-# Direct rustls so we can install a CryptoProvider. `ring` stays available for
-# the non-FIPS opt-out; `fips` adds `rustls/fips` (AWS-LC FIPS provider).
-rustls = { version = "0.23", default-features = false, features = ["std", "tls12"], optional = true }
 percent-encoding = "2"
 zeroize = { version = "1", features = ["derive"] }
 subtle = "2"
-# `default-features = false` keeps the non-FIPS `aws-lc-sys` out of *our*
-# declaration; `alloc` / `ring-io` / `ring-sig-verify` restore the API surface.
-# Note: `rustls/fips` may still unify `aws-lc-sys` into the graph (documented
-# in docs/fips/BOUNDARY.md); runtime FIPS mode is attested via try_fips_mode.
-aws-lc-rs = { version = "1", optional = true, default-features = false, features = ["alloc", "ring-io", "ring-sig-verify", "fips"] }
+
+# --- RustCrypto primitives: optional, only for non-FIPS builds / specific
+# features. None of these are pulled by the Circlip feature set
+# (`rsa-sha`, `metadata-emit`, `xsd-validate`, `fips`).
+sha1 = { version = "0.10", optional = true, features = ["oid"] }
+sha2 = { version = "0.10", optional = true, features = ["oid"] }
+hmac = { version = "0.12", optional = true }
+aes = { version = "0.8", optional = true }
+cbc = { version = "0.1", optional = true }
+aes-gcm = { version = "0.10", optional = true }
+ecdsa = { version = "0.16", optional = true }
+p256 = { version = "0.13", optional = true, features = ["ecdsa", "pem"] }
+p384 = { version = "0.13", optional = true, features = ["ecdsa", "pem"] }
+
+# Optional HTTP client (reqwest-client feature only).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"], optional = true }
+
+# Pinned to match Circlip. `default-features = false` keeps non-FIPS
+# `aws-lc-sys` out; `alloc` / `ring-io` / `ring-sig-verify` restore the API
+# surface used for verification and key I/O.
+aws-lc-rs = { version = "=1.19.0", optional = true, default-features = false, features = ["fips", "alloc", "ring-io", "ring-sig-verify"] }
 
 [features]
-# This fork defaults to FIPS-module-backed SAML crypto + TLS. Build needs a C
-# compiler, cmake, and go. Opt out with `--no-default-features` and the
-# feature list without `fips` (pure-Rust paths remain). See docs/fips/.
+# Upstream defaults (FIPS + every optional profile). Circlip uses
+# `default-features = false` with `rsa-sha`, `metadata-emit`, `xsd-validate`,
+# `fips`.
 default = ["reqwest-client", "rsa-sha", "ecdsa-sha", "xmlenc", "slo", "metadata-emit", "xsd-validate", "fips"]
+# Pure-RustCrypto implementations (sha2, hmac, aes, aes-gcm, cbc). Required
+# whenever `fips` is off; unused (and not compiled) when `fips` is on unless
+# another feature needs them.
+rustcrypto = ["dep:sha2", "dep:hmac", "dep:aes", "dep:cbc", "dep:aes-gcm"]
 reqwest-client = ["dep:reqwest", "dep:rustls", "rustls/ring"]
 rsa-sha = []
-ecdsa-sha = []
-xmlenc = []
+ecdsa-sha = ["dep:ecdsa", "dep:p256", "dep:p384"]
+xmlenc = ["rustcrypto"]
 slo = []
 metadata-emit = []
-# The SAML 2.0 artifact format (Bindings §3.6.4, type 0x0004) derives its
-# SourceID as SHA-1 of the issuer entity ID. That is an identifier
-# derivation, not a signature, so it is pulled in directly rather than via
-# `weak-algos` — enabling the artifact binding must not also compile in
-# weak *signature* and *digest* algorithms.
 artifact-binding = ["dep:sha1"]
-# Identity Provider Discovery: the Common Domain Cookie profile (SAML 2.0
-# Profiles §4.3) and the Identity Provider Discovery Service Protocol and
-# Profile (OASIS sstc-saml-idp-discovery-cs-01). Pure string / URL codecs plus
-# <idpdisc:DiscoveryResponse> metadata parse + emit; no extra dependencies.
 idp-disco = []
-# Enhanced Client or Proxy profile (SAML 2.0 Profiles §4.2) + the Reverse-SOAP
-# (PAOS) binding (SAML 2.0 Bindings §3.3). The non-browser SSO flow used by
-# desktop apps and federated CLI tooling. Layers a SOAP envelope + PAOS header
-# blocks on top of the existing assertion machinery; reuses `binding::soap`.
 ecp = []
-# Route SAML crypto and (with `reqwest-client`) rustls TLS through the
-# FIPS 140-3 validated AWS-LC module via aws-lc-rs. Does not CMVP-certify
-# this crate. See docs/fips/ and docs/rfcs/RFC-009-fips.md.
 fips = ["dep:aws-lc-rs", "aws-lc-rs/fips", "rustls?/fips"]
 weak-algos = ["dep:sha1"]
-# Structural XSD-style schema validation of inbound SAML messages. On by
-# default; opt-out via `default-features = false` for permissive interop with
-# IdPs that emit borderline-non-conformant XML.
 xsd-validate = []
 
 [dev-dependencies]

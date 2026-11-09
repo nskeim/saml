@@ -35,8 +35,9 @@ use crate::dsig::algorithms::{
 #[cfg(feature = "slo")]
 use crate::dsig::reference::DS_NS;
 use crate::dsig::sign::{SignOptions, sign_detached_query, sign_element};
+use crate::dsig::verify::verify_detached_signature_with;
 #[cfg(feature = "slo")]
-use crate::dsig::verify::{verify_detached_signature_with, verify_signature_with};
+use crate::dsig::verify::verify_signature_with;
 use crate::error::Error;
 #[cfg(feature = "slo")]
 use crate::http::{HttpClient, HttpRequest};

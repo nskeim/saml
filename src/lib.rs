@@ -327,6 +327,12 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(not(any(feature = "fips", feature = "rustcrypto")))]
+compile_error!(
+    "saml requires a crypto backend: enable the `fips` feature (AWS-LC FIPS, no RustCrypto \
+     hashes/MACs/AEADs) or the `rustcrypto` feature (pure-Rust sha2/hmac/aes)"
+);
+
 pub mod error;
 pub mod http;
 pub mod replay;

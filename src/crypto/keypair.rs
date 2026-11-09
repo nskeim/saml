@@ -23,6 +23,7 @@
 
 use pkcs8::DecodePrivateKey;
 use rsa::RsaPrivateKey;
+#[cfg(any(not(feature = "fips"), feature = "xmlenc"))]
 use sha2::{Sha256, Sha384, Sha512};
 use std::str;
 use zeroize::ZeroizeOnDrop;
@@ -33,16 +34,18 @@ use crate::error::Error;
 
 #[cfg(feature = "fips")]
 use aws_lc_rs::rand::SystemRandom;
-#[cfg(feature = "fips")]
+#[cfg(all(feature = "fips", feature = "xmlenc"))]
 use aws_lc_rs::rsa::{
     OAEP_SHA1_MGF1SHA1, OAEP_SHA256_MGF1SHA256, OAEP_SHA384_MGF1SHA384, OAEP_SHA512_MGF1SHA512,
-    OaepPrivateDecryptingKey, PrivateDecryptingKey,
 };
-#[cfg(feature = "fips")]
+#[cfg(all(feature = "fips", feature = "xmlenc"))]
+use aws_lc_rs::rsa::{OaepPrivateDecryptingKey, PrivateDecryptingKey};
+#[cfg(all(feature = "fips", feature = "ecdsa-sha"))]
 use aws_lc_rs::signature::{
     ECDSA_P256_SHA256_FIXED_SIGNING, ECDSA_P384_SHA384_FIXED_SIGNING, EcdsaKeyPair,
-    RSA_PKCS1_SHA256, RSA_PKCS1_SHA384, RSA_PKCS1_SHA512, RsaKeyPair,
 };
+#[cfg(feature = "fips")]
+use aws_lc_rs::signature::{RSA_PKCS1_SHA256, RSA_PKCS1_SHA384, RSA_PKCS1_SHA512, RsaKeyPair};
 
 /// Hash selection for RSA-OAEP.
 ///
@@ -164,7 +167,7 @@ pub struct KeyPair {
     #[cfg(feature = "fips")]
     aws_signer: std::sync::Mutex<std::option::Option<AwsSigningKey>>,
     // FIPS build: lazily-built RSA-OAEP decrypter, cached after first use.
-    #[cfg(feature = "fips")]
+    #[cfg(all(feature = "fips", feature = "xmlenc"))]
     aws_oaep_decrypter: std::sync::Mutex<std::option::Option<OaepPrivateDecryptingKey>>,
 }
 
@@ -178,6 +181,7 @@ impl Clone for KeyPair {
             cert: self.cert.clone(),
             public_key: self.public_key.clone(),
             aws_signer: std::sync::Mutex::new(None),
+            #[cfg(feature = "xmlenc")]
             aws_oaep_decrypter: std::sync::Mutex::new(None),
         }
     }
@@ -187,14 +191,18 @@ impl Clone for KeyPair {
 #[cfg(feature = "fips")]
 enum AwsSigningKey {
     Rsa(RsaKeyPair),
+    #[cfg(feature = "ecdsa-sha")]
     EcdsaP256(EcdsaKeyPair),
+    #[cfg(feature = "ecdsa-sha")]
     EcdsaP384(EcdsaKeyPair),
 }
 
 #[derive(Clone)]
 enum KeyPairInner {
     Rsa(RsaSecret),
+    #[cfg(feature = "ecdsa-sha")]
     EcdsaP256(P256Secret),
+    #[cfg(feature = "ecdsa-sha")]
     EcdsaP384(P384Secret),
 }
 
@@ -209,11 +217,13 @@ struct RsaSecret {
     key: RsaPrivateKey,
 }
 
+#[cfg(feature = "ecdsa-sha")]
 #[derive(Clone, ZeroizeOnDrop)]
 struct P256Secret {
     key: p256::ecdsa::SigningKey,
 }
 
+#[cfg(feature = "ecdsa-sha")]
 #[derive(Clone, ZeroizeOnDrop)]
 struct P384Secret {
     key: p384::ecdsa::SigningKey,
@@ -235,14 +245,20 @@ impl KeyPair {
         if let Ok(key) = RsaPrivateKey::from_pkcs8_pem(pem_str) {
             return Self::from_rsa_private_key(key);
         }
-        if let Ok(key) = p256::ecdsa::SigningKey::from_pkcs8_pem(pem_str) {
-            return Self::from_p256_signing_key(key);
-        }
-        if let Ok(key) = p384::ecdsa::SigningKey::from_pkcs8_pem(pem_str) {
-            return Self::from_p384_signing_key(key);
+        #[cfg(feature = "ecdsa-sha")]
+        {
+            if let Ok(key) = p256::ecdsa::SigningKey::from_pkcs8_pem(pem_str) {
+                return Self::from_p256_signing_key(key);
+            }
+            if let Ok(key) = p384::ecdsa::SigningKey::from_pkcs8_pem(pem_str) {
+                return Self::from_p384_signing_key(key);
+            }
         }
         Err(Error::InvalidConfiguration {
+            #[cfg(feature = "ecdsa-sha")]
             reason: "unrecognized PKCS#8 private key (not RSA / P-256 / P-384)",
+            #[cfg(not(feature = "ecdsa-sha"))]
+            reason: "unrecognized PKCS#8 private key (not RSA; ecdsa-sha is disabled)",
         })
     }
 
@@ -266,11 +282,14 @@ impl KeyPair {
         if let Ok(key) = RsaPrivateKey::from_pkcs8_der(der) {
             return Self::from_rsa_private_key(key);
         }
-        if let Ok(key) = p256::ecdsa::SigningKey::from_pkcs8_der(der) {
-            return Self::from_p256_signing_key(key);
-        }
-        if let Ok(key) = p384::ecdsa::SigningKey::from_pkcs8_der(der) {
-            return Self::from_p384_signing_key(key);
+        #[cfg(feature = "ecdsa-sha")]
+        {
+            if let Ok(key) = p256::ecdsa::SigningKey::from_pkcs8_der(der) {
+                return Self::from_p256_signing_key(key);
+            }
+            if let Ok(key) = p384::ecdsa::SigningKey::from_pkcs8_der(der) {
+                return Self::from_p384_signing_key(key);
+            }
         }
         Err(Error::InvalidConfiguration {
             reason: "unrecognized PKCS#8 DER private key",
@@ -295,11 +314,12 @@ impl KeyPair {
             public_key,
             #[cfg(feature = "fips")]
             aws_signer: std::sync::Mutex::new(None),
-            #[cfg(feature = "fips")]
+            #[cfg(all(feature = "fips", feature = "xmlenc"))]
             aws_oaep_decrypter: std::sync::Mutex::new(None),
         })
     }
 
+    #[cfg(feature = "ecdsa-sha")]
     fn from_p256_signing_key(key: p256::ecdsa::SigningKey) -> Result<Self, Error> {
         use p256::pkcs8::EncodePublicKey as _;
         let vk = key.verifying_key();
@@ -315,11 +335,12 @@ impl KeyPair {
             public_key,
             #[cfg(feature = "fips")]
             aws_signer: std::sync::Mutex::new(None),
-            #[cfg(feature = "fips")]
+            #[cfg(all(feature = "fips", feature = "xmlenc"))]
             aws_oaep_decrypter: std::sync::Mutex::new(None),
         })
     }
 
+    #[cfg(feature = "ecdsa-sha")]
     fn from_p384_signing_key(key: p384::ecdsa::SigningKey) -> Result<Self, Error> {
         use p384::pkcs8::EncodePublicKey as _;
         let vk = key.verifying_key();
@@ -335,7 +356,7 @@ impl KeyPair {
             public_key,
             #[cfg(feature = "fips")]
             aws_signer: std::sync::Mutex::new(None),
-            #[cfg(feature = "fips")]
+            #[cfg(all(feature = "fips", feature = "xmlenc"))]
             aws_oaep_decrypter: std::sync::Mutex::new(None),
         })
     }
@@ -427,6 +448,7 @@ impl KeyPair {
             (KeyPairInner::Rsa(secret), SignatureAlgorithm::RsaSha1) => {
                 sign_rsa::<sha1::Sha1>(&secret.key, signed_bytes)
             }
+            #[cfg(feature = "ecdsa-sha")]
             (KeyPairInner::EcdsaP256(secret), SignatureAlgorithm::EcdsaSha256) => {
                 use signature::Signer as _;
                 let sig: p256::ecdsa::Signature =
@@ -437,6 +459,7 @@ impl KeyPair {
                     })?;
                 Ok(sig.to_bytes().to_vec())
             }
+            #[cfg(feature = "ecdsa-sha")]
             (KeyPairInner::EcdsaP384(secret), SignatureAlgorithm::EcdsaSha384) => {
                 use signature::Signer as _;
                 let sig: p384::ecdsa::Signature =
@@ -497,6 +520,7 @@ impl KeyPair {
                     })?;
                 Ok(sig)
             }
+            #[cfg(feature = "ecdsa-sha")]
             (AwsSigningKey::EcdsaP256(kp), SignatureAlgorithm::EcdsaSha256) => {
                 let sig =
                     kp.sign(&rng, signed_bytes)
@@ -505,6 +529,7 @@ impl KeyPair {
                         })?;
                 Ok(sig.as_ref().to_vec())
             }
+            #[cfg(feature = "ecdsa-sha")]
             (AwsSigningKey::EcdsaP384(kp), SignatureAlgorithm::EcdsaSha384) => {
                 let sig =
                     kp.sign(&rng, signed_bytes)
@@ -543,7 +568,7 @@ impl KeyPair {
     /// FIPS build: lazily build (and cache) the aws-lc-rs RSA-OAEP
     /// decrypter from the stored secret. Returns a guard holding the built
     /// decrypter; the first call builds it, later calls reuse the cache.
-    #[cfg(feature = "fips")]
+    #[cfg(all(feature = "fips", feature = "xmlenc"))]
     fn aws_oaep_decrypter(
         &self,
     ) -> Result<std::sync::MutexGuard<'_, Option<OaepPrivateDecryptingKey>>, Error> {
@@ -554,6 +579,13 @@ impl KeyPair {
                     reason: "OAEP decrypter lock poisoned",
                 })?;
         if guard.is_none() {
+            #[cfg_attr(
+                not(feature = "ecdsa-sha"),
+                expect(
+                    irrefutable_let_patterns,
+                    reason = "RSA is the only key family without ecdsa-sha"
+                )
+            )]
             let KeyPairInner::Rsa(secret) = &self.inner else {
                 return Err(Error::InvalidConfiguration {
                     reason: "not an RSA key",
@@ -566,7 +598,7 @@ impl KeyPair {
 
     /// FIPS build: build the aws-lc-rs RSA-OAEP decrypter from the stored
     /// secret, re-encoded to PKCS#8 DER.
-    #[cfg(feature = "fips")]
+    #[cfg(all(feature = "fips", feature = "xmlenc"))]
     fn build_aws_oaep_decrypter(secret: &RsaSecret) -> Result<OaepPrivateDecryptingKey, Error> {
         use pkcs8::EncodePrivateKey as _;
         let der = secret
@@ -603,6 +635,7 @@ impl KeyPair {
                         reason: "aws-lc-rs rejected RSA key",
                     })
             }
+            #[cfg(feature = "ecdsa-sha")]
             KeyPairInner::EcdsaP256(secret) => {
                 let der = secret
                     .key
@@ -616,6 +649,7 @@ impl KeyPair {
                         reason: "aws-lc-rs rejected P-256 key",
                     })
             }
+            #[cfg(feature = "ecdsa-sha")]
             KeyPairInner::EcdsaP384(secret) => {
                 let der = secret
                     .key
@@ -656,6 +690,13 @@ impl KeyPair {
             expect(
                 unused_variables,
                 reason = "secret is only used by the non-FIPS fallback path"
+            )
+        )]
+        #[cfg_attr(
+            not(feature = "ecdsa-sha"),
+            expect(
+                irrefutable_let_patterns,
+                reason = "RSA is the only key family without ecdsa-sha"
             )
         )]
         let KeyPairInner::Rsa(secret) = &self.inner else {
@@ -728,6 +769,13 @@ impl KeyPair {
     /// callers from accidentally surfacing a side-channel.
     #[cfg(all(feature = "xmlenc", feature = "weak-algos"))]
     pub fn decrypt_rsa_pkcs1v15(&self, ciphertext: &[u8]) -> Result<Vec<u8>, Error> {
+        #[cfg_attr(
+            not(feature = "ecdsa-sha"),
+            expect(
+                irrefutable_let_patterns,
+                reason = "RSA is the only key family without ecdsa-sha"
+            )
+        )]
         let KeyPairInner::Rsa(secret) = &self.inner else {
             return Err(Error::DecryptFailed {
                 reason: "key transport",
@@ -853,6 +901,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ecdsa-sha")]
     fn ec_p256_pkcs8_pem_parses() {
         let kp = KeyPair::from_pkcs8_pem(EC_P256_KEY_PKCS8_PEM).expect("parse P-256 PKCS#8");
         assert_eq!(kp.algorithm_family(), PublicKeyAlgorithm::EcdsaP256);
@@ -964,6 +1013,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ecdsa-sha")]
     fn ecdsa_p256_sign_verify_round_trip() {
         let kp = KeyPair::from_pkcs8_pem(EC_P256_KEY_PKCS8_PEM).unwrap();
         let cert = X509Certificate::from_pem(EC_P256_CERT_PEM).unwrap();
@@ -979,6 +1029,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ecdsa-sha")]
     fn sign_rejects_algorithm_mismatched_with_key_family() {
         let kp = KeyPair::from_pkcs8_pem(EC_P256_KEY_PKCS8_PEM).unwrap();
         let err = kp
@@ -988,6 +1039,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ecdsa-sha")]
     fn sign_rejects_p256_with_ecdsa_sha384() {
         let kp = KeyPair::from_pkcs8_pem(EC_P256_KEY_PKCS8_PEM).unwrap();
         let err = kp

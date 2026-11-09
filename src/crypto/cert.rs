@@ -21,18 +21,20 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-#[cfg(test)]
-use sha2::Digest as _;
 // Sha384/Sha512 are only used by the non-FIPS verifier; Sha256 is also used
 // by tests (fingerprint_is_stable).
-#[cfg(any(not(feature = "fips"), test))]
+#[cfg(all(test, feature = "rustcrypto"))]
+use sha2::Digest as _;
+#[cfg(all(feature = "rustcrypto", any(not(feature = "fips"), test)))]
 use sha2::Sha256;
-#[cfg(not(feature = "fips"))]
+#[cfg(all(feature = "rustcrypto", not(feature = "fips")))]
 use sha2::{Sha384, Sha512};
 use std::fmt;
 use std::time::SystemTime;
 
-use const_oid::db::rfc5912::{ID_EC_PUBLIC_KEY, RSA_ENCRYPTION, SECP_256_R_1, SECP_384_R_1};
+use const_oid::db::rfc5912::RSA_ENCRYPTION;
+#[cfg(feature = "ecdsa-sha")]
+use const_oid::db::rfc5912::{ID_EC_PUBLIC_KEY, SECP_256_R_1, SECP_384_R_1};
 use rsa::RsaPublicKey;
 #[cfg(any(not(feature = "fips"), feature = "weak-algos"))]
 use rsa::pkcs1v15::VerifyingKey as RsaPkcs1v15VerifyingKey;
@@ -43,11 +45,15 @@ use subtle::ConstantTimeEq as _;
 use x509_cert::Certificate;
 use x509_cert::der::{Decode as _, DecodePem, Encode as _};
 
-#[cfg(feature = "fips")]
+#[cfg(all(feature = "fips", feature = "ecdsa-sha"))]
 use aws_lc_rs::signature::{
     ECDSA_P256_SHA256_ASN1, ECDSA_P256_SHA256_FIXED, ECDSA_P384_SHA384_ASN1,
-    ECDSA_P384_SHA384_FIXED, EcdsaVerificationAlgorithm, RSA_PKCS1_2048_8192_SHA256,
-    RSA_PKCS1_2048_8192_SHA384, RSA_PKCS1_2048_8192_SHA512, RsaParameters, UnparsedPublicKey,
+    ECDSA_P384_SHA384_FIXED, EcdsaVerificationAlgorithm,
+};
+#[cfg(feature = "fips")]
+use aws_lc_rs::signature::{
+    RSA_PKCS1_2048_8192_SHA256, RSA_PKCS1_2048_8192_SHA384, RSA_PKCS1_2048_8192_SHA512,
+    RsaParameters, UnparsedPublicKey,
 };
 
 use crate::dsig::algorithms::{DigestAlgorithm, SignatureAlgorithm};
@@ -302,7 +308,10 @@ pub struct PublicKey {
 // FIPS builds verify via aws-lc-rs from `spki_der`, so the parsed key
 // material is only used to discriminate the variant, not read.
 #[cfg_attr(
-    feature = "fips",
+    all(
+        feature = "fips",
+        any(feature = "ecdsa-sha", not(feature = "weak-algos"))
+    ),
     expect(
         dead_code,
         reason = "FIPS verifies via spki_der; parsed key only discriminates variant"
@@ -310,7 +319,9 @@ pub struct PublicKey {
 )]
 enum PublicKeyInner {
     Rsa(RsaPublicKey),
+    #[cfg(feature = "ecdsa-sha")]
     EcdsaP256(p256::ecdsa::VerifyingKey),
+    #[cfg(feature = "ecdsa-sha")]
     EcdsaP384(p384::ecdsa::VerifyingKey),
 }
 
@@ -335,7 +346,29 @@ impl PublicKey {
                 #[cfg(feature = "fips")]
                 spki_der: spki.to_vec(),
             })
-        } else if oid == ID_EC_PUBLIC_KEY {
+        } else {
+            #[cfg(feature = "ecdsa-sha")]
+            {
+                Self::ecdsa_from_spki(&parsed, key_bytes, spki)
+            }
+            #[cfg(not(feature = "ecdsa-sha"))]
+            {
+                Err(Error::X509Parse)
+            }
+        }
+    }
+
+    /// ECDSA branch of [`Self::from_spki_der`]; only available with the
+    /// `ecdsa-sha` feature (it needs the `p256` / `p384` crates).
+    #[cfg(feature = "ecdsa-sha")]
+    fn ecdsa_from_spki(
+        parsed: &SubjectPublicKeyInfoRef<'_>,
+        key_bytes: &[u8],
+        spki: &[u8],
+    ) -> Result<Self, Error> {
+        #[cfg(not(feature = "fips"))]
+        let _ = spki;
+        if parsed.algorithm.oid == ID_EC_PUBLIC_KEY {
             // Algorithm parameters carry the curve OID for ECDSA keys; we use
             // it to pick between P-256 and P-384.
             let params = parsed.algorithm.parameters.ok_or(Error::X509Parse)?;
@@ -371,7 +404,9 @@ impl PublicKey {
     pub fn algorithm_family(&self) -> PublicKeyAlgorithm {
         match &self.inner {
             PublicKeyInner::Rsa(_) => PublicKeyAlgorithm::Rsa,
+            #[cfg(feature = "ecdsa-sha")]
             PublicKeyInner::EcdsaP256(_) => PublicKeyAlgorithm::EcdsaP256,
+            #[cfg(feature = "ecdsa-sha")]
             PublicKeyInner::EcdsaP384(_) => PublicKeyAlgorithm::EcdsaP384,
         }
     }
@@ -463,9 +498,11 @@ impl PublicKey {
                         reason: "rsa-sha1 verify failed",
                     })
             }
+            #[cfg(feature = "ecdsa-sha")]
             (PublicKeyInner::EcdsaP256(vk), SignatureAlgorithm::EcdsaSha256) => {
                 verify_ecdsa_p256(vk, signed_bytes, signature_bytes)
             }
+            #[cfg(feature = "ecdsa-sha")]
             (PublicKeyInner::EcdsaP384(vk), SignatureAlgorithm::EcdsaSha384) => {
                 verify_ecdsa_p384(vk, signed_bytes, signature_bytes)
             }
@@ -507,6 +544,7 @@ impl PublicKey {
                 signed_bytes,
                 signature_bytes,
             ),
+            #[cfg(feature = "ecdsa-sha")]
             (PublicKeyInner::EcdsaP256(_), SignatureAlgorithm::EcdsaSha256) => verify_ecdsa_fips(
                 &ECDSA_P256_SHA256_FIXED,
                 &ECDSA_P256_SHA256_ASN1,
@@ -514,6 +552,7 @@ impl PublicKey {
                 signed_bytes,
                 signature_bytes,
             ),
+            #[cfg(feature = "ecdsa-sha")]
             (PublicKeyInner::EcdsaP384(_), SignatureAlgorithm::EcdsaSha384) => verify_ecdsa_fips(
                 &ECDSA_P384_SHA384_FIXED,
                 &ECDSA_P384_SHA384_ASN1,
@@ -530,7 +569,7 @@ impl PublicKey {
 
 /// Try IEEE P1363 first (the XML-DSig wire format), fall back to ASN.1 DER for
 /// legacy IdPs that emit DER.
-#[cfg(not(feature = "fips"))]
+#[cfg(all(feature = "ecdsa-sha", not(feature = "fips")))]
 fn verify_ecdsa_p256(
     vk: &p256::ecdsa::VerifyingKey,
     signed_bytes: &[u8],
@@ -551,7 +590,7 @@ fn verify_ecdsa_p256(
     })
 }
 
-#[cfg(not(feature = "fips"))]
+#[cfg(all(feature = "ecdsa-sha", not(feature = "fips")))]
 fn verify_ecdsa_p384(
     vk: &p384::ecdsa::VerifyingKey,
     signed_bytes: &[u8],
@@ -590,7 +629,7 @@ fn verify_rsa_fips(
 
 /// FIPS build: ECDSA verify via aws-lc-rs. Try IEEE P1363 first (the
 /// XML-DSig wire format), then ASN.1 DER for legacy IdPs that emit DER.
-#[cfg(feature = "fips")]
+#[cfg(all(feature = "ecdsa-sha", feature = "fips"))]
 fn verify_ecdsa_fips(
     fixed: &'static EcdsaVerificationAlgorithm,
     asn1: &'static EcdsaVerificationAlgorithm,
@@ -758,13 +797,17 @@ mod tests {
         let cert2 = X509Certificate::from_pem(RSA_CERT_PEM).unwrap();
         assert_eq!(cert1.fingerprint_sha256(), cert2.fingerprint_sha256());
 
-        let mut hasher = Sha256::new();
-        hasher.update(cert1.to_der());
-        let direct: [u8; 32] = hasher.finalize().into();
-        assert_eq!(cert1.fingerprint_sha256(), direct);
+        #[cfg(feature = "rustcrypto")]
+        {
+            let mut hasher = Sha256::new();
+            hasher.update(cert1.to_der());
+            let direct: [u8; 32] = hasher.finalize().into();
+            assert_eq!(cert1.fingerprint_sha256(), direct);
+        }
     }
 
     #[test]
+    #[cfg(feature = "ecdsa-sha")]
     fn ec_p256_cert_pem_parses() {
         let cert = X509Certificate::from_pem(EC_P256_CERT_PEM).expect("parse EC PEM");
         assert_eq!(
@@ -781,6 +824,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ecdsa-sha")]
     fn debug_and_public_key_comparison_do_not_expose_or_confuse_key_material() {
         let rsa = X509Certificate::from_pem(RSA_CERT_PEM).expect("RSA cert");
         let same_rsa = X509Certificate::from_der(rsa.to_der()).expect("same cert from DER");
@@ -795,6 +839,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ecdsa-sha")]
     fn fingerprint_set_is_sorted_and_deduplicated() {
         let rsa = X509Certificate::from_pem(RSA_CERT_PEM).expect("RSA cert");
         let ec = X509Certificate::from_pem(EC_P256_CERT_PEM).expect("EC cert");
