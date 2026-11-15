@@ -1182,38 +1182,61 @@ mod tests {
                 );
             }};
         }
-        macro_rules! check_mgf_hashes {
-            ($digest:ident, $digest_type:ty) => {
-                check_pair!($digest, $digest_type, Sha256, Sha256);
-                check_pair!($digest, $digest_type, Sha384, Sha384);
-                check_pair!($digest, $digest_type, Sha512, Sha512);
-                #[cfg(feature = "weak-algos")]
-                check_pair!($digest, $digest_type, Sha1, sha1::Sha1);
-            };
-        }
-        check_mgf_hashes!(Sha256, Sha256);
-        check_mgf_hashes!(Sha384, Sha384);
-        check_mgf_hashes!(Sha512, Sha512);
-        #[cfg(feature = "weak-algos")]
-        check_mgf_hashes!(Sha1, sha1::Sha1);
+        // AWS-LC FIPS only supports paired OAEP (label hash == MGF1 hash).
+        // Under `fips`, exercise the paired matrix only; the independent
+        // cross-product remains the non-FIPS coverage for #22's dispatch.
+        #[cfg(feature = "fips")]
+        {
+            check_pair!(Sha256, Sha256, Sha256, Sha256);
+            check_pair!(Sha384, Sha384, Sha384, Sha384);
+            check_pair!(Sha512, Sha512, Sha512, Sha512);
+            #[cfg(feature = "weak-algos")]
+            check_pair!(Sha1, sha1::Sha1, Sha1, sha1::Sha1);
 
-        let ciphertext = public
-            .encrypt(
-                &mut rng,
-                rsa::Oaep::<Sha384, Sha512>::new_with_mgf_hash(),
-                plaintext,
-            )
-            .expect("encrypt mixed digest pair");
-        for (digest, mgf) in [
-            (OaepDigest::Sha256, OaepDigest::Sha512),
-            (OaepDigest::Sha384, OaepDigest::Sha256),
-        ] {
             assert!(matches!(
-                keypair.decrypt_rsa_oaep(&ciphertext, digest, mgf),
-                Err(Error::DecryptFailed {
-                    reason: "key transport"
-                })
+                keypair.decrypt_rsa_oaep(
+                    b"not-a-ciphertext",
+                    OaepDigest::Sha256,
+                    OaepDigest::Sha384
+                ),
+                Err(Error::DisallowedAlgorithm { .. })
             ));
+        }
+        #[cfg(not(feature = "fips"))]
+        {
+            macro_rules! check_mgf_hashes {
+                ($digest:ident, $digest_type:ty) => {
+                    check_pair!($digest, $digest_type, Sha256, Sha256);
+                    check_pair!($digest, $digest_type, Sha384, Sha384);
+                    check_pair!($digest, $digest_type, Sha512, Sha512);
+                    #[cfg(feature = "weak-algos")]
+                    check_pair!($digest, $digest_type, Sha1, sha1::Sha1);
+                };
+            }
+            check_mgf_hashes!(Sha256, Sha256);
+            check_mgf_hashes!(Sha384, Sha384);
+            check_mgf_hashes!(Sha512, Sha512);
+            #[cfg(feature = "weak-algos")]
+            check_mgf_hashes!(Sha1, sha1::Sha1);
+
+            let ciphertext = public
+                .encrypt(
+                    &mut rng,
+                    rsa::Oaep::<Sha384, Sha512>::new_with_mgf_hash(),
+                    plaintext,
+                )
+                .expect("encrypt mixed digest pair");
+            for (digest, mgf) in [
+                (OaepDigest::Sha256, OaepDigest::Sha512),
+                (OaepDigest::Sha384, OaepDigest::Sha256),
+            ] {
+                assert!(matches!(
+                    keypair.decrypt_rsa_oaep(&ciphertext, digest, mgf),
+                    Err(Error::DecryptFailed {
+                        reason: "key transport"
+                    })
+                ));
+            }
         }
     }
 
