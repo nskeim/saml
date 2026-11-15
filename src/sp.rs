@@ -3514,6 +3514,7 @@ mod tests {
                 saml_response: xml.as_bytes(),
                 binding: SsoResponseBinding::HttpPost,
                 relay_state: None,
+                detached_signature: None,
                 tracker: None,
                 expected_destination: "https://sp.example.com/acs",
                 now: fixed_now(),

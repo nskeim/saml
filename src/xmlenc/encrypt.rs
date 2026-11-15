@@ -19,7 +19,7 @@ use aes_gcm::{Aes128Gcm, Aes256Gcm};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 #[cfg(any(not(feature = "fips"), test))]
-use rand::{TryRng as _, rngs::SysRng};
+use rand::rngs::SysRng;
 use rsa::PublicKey;
 use rsa::pkcs1::DecodeRsaPublicKey as _;
 #[cfg(all(feature = "weak-algos", not(feature = "fips")))]

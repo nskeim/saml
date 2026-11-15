@@ -13,7 +13,7 @@ use aes_gcm::aead::{Aead, KeyInit, Payload};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 #[cfg(not(feature = "fips"))]
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit as HmacKeyInit, Mac};
 #[cfg(not(feature = "fips"))]
 use sha2::Sha256;
 
@@ -1514,11 +1514,12 @@ impl NameIdTransform for PersistentPerSpHmac {
         };
         #[cfg(not(feature = "fips"))]
         let digest = {
-            let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&self.key).map_err(|_err| {
-                Error::InvalidConfiguration {
-                    reason: "HMAC-SHA256 key size mismatch",
-                }
-            })?;
+            let mut mac =
+                <Hmac<Sha256> as HmacKeyInit>::new_from_slice(&self.key).map_err(|_err| {
+                    Error::InvalidConfiguration {
+                        reason: "HMAC-SHA256 key size mismatch",
+                    }
+                })?;
             mac.update(&msg);
             mac.finalize().into_bytes()
         };

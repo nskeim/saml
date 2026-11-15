@@ -106,6 +106,7 @@ fn consume_input<'a>(f: &'a Fixture, saml_response: &'a [u8]) -> ConsumeResponse
         saml_response,
         binding: SsoResponseBinding::HttpPost,
         relay_state: None,
+        detached_signature: None,
         tracker: None,
         expected_destination: SP_ACS_URL,
         now: f.now,
