@@ -23,10 +23,7 @@
 
 use pkcs8::DecodePrivateKey;
 use rsa::PrivateKey as RsaPrivateKey;
-#[cfg(any(
-    all(feature = "rustcrypto", not(feature = "fips")),
-    feature = "xmlenc"
-))]
+#[cfg(all(feature = "rustcrypto", not(feature = "fips")))]
 use sha2::{Sha256, Sha384, Sha512};
 use std::str;
 use zeroize::ZeroizeOnDrop;
@@ -799,7 +796,7 @@ impl KeyPair {
 }
 
 /// Runtime selection of independently typed OAEP and MGF1 hashes.
-#[cfg(feature = "xmlenc")]
+#[cfg(all(feature = "xmlenc", not(feature = "fips")))]
 pub(crate) struct OaepPadding {
     oaep_digest: OaepDigest,
     mgf1_digest: OaepDigest,
@@ -807,7 +804,7 @@ pub(crate) struct OaepPadding {
 
 // Instantiate concrete padding at the operation boundary: RSA 0.10 requires
 // digest type parameters, but the wire selects the two hashes independently.
-#[cfg(feature = "xmlenc")]
+#[cfg(all(feature = "xmlenc", not(feature = "fips")))]
 macro_rules! dispatch_oaep {
     ($selection:expr, |$padding:ident| $operation:expr) => {{
         macro_rules! with_mgf_hash {
@@ -847,7 +844,7 @@ macro_rules! dispatch_oaep {
     }};
 }
 
-#[cfg(feature = "xmlenc")]
+#[cfg(all(feature = "xmlenc", not(feature = "fips")))]
 impl rsa::traits::PaddingScheme for OaepPadding {
     fn decrypt<R: rsa::rand_core::TryCryptoRng + ?Sized>(
         self,
@@ -870,11 +867,7 @@ impl rsa::traits::PaddingScheme for OaepPadding {
 
 /// Select OAEP label and MGF1 hashes independently, per XML Encryption 1.1 §5.5.2.
 /// SHA-1 in either position requires `weak-algos`.
-#[cfg(feature = "xmlenc")]
-#[cfg_attr(
-    all(feature = "fips", not(test)),
-    expect(dead_code, reason = "pure-Rust OAEP helper unused under FIPS")
-)]
+#[cfg(all(feature = "xmlenc", not(feature = "fips")))]
 #[cfg_attr(
     feature = "weak-algos",
     expect(
