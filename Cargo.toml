@@ -82,13 +82,15 @@ aws-lc-rs = { version = "=1.19.0", optional = true, default-features = false, fe
 # `xsd-validate`, `fips`.
 default = ["reqwest-client", "rsa-sha", "ecdsa-sha", "xmlenc", "slo", "metadata-emit", "xsd-validate", "fips"]
 # Pure-RustCrypto implementations (sha2, hmac, aes, aes-gcm, cbc, ctr).
-# Required whenever `fips` is off; unused when `fips` is on unless another
-# feature (e.g. `xmlenc`) pulls them in.
+# Required whenever `fips` is off for digest/AEAD/HMAC paths. Under `fips`,
+# enable `xmlenc` without `rustcrypto` — ops route through aws-lc-rs (RFC-009).
 rustcrypto = ["dep:sha2", "dep:hmac", "dep:aes", "dep:cbc", "dep:aes-gcm", "dep:ctr"]
 reqwest-client = ["dep:reqwest", "dep:rustls", "rustls/ring"]
 rsa-sha = []
 ecdsa-sha = ["dep:ecdsa", "dep:p256", "dep:p384"]
-xmlenc = ["rustcrypto"]
+# Capability flag only; crypto backend is `fips` or `rustcrypto`. Non-FIPS
+# consumers that enable `xmlenc` must also enable `rustcrypto`.
+xmlenc = []
 slo = []
 metadata-emit = []
 # The SAML 2.0 artifact format (Bindings §3.6.4, type 0x0004) derives its
